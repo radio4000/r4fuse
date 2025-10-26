@@ -2,6 +2,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { spawn } from 'child_process'
 import { config } from './config.js'
+import { loadSettings } from './preferences.js'
 import { createSdk } from '@radio4000/sdk'
 import { createClient } from '@supabase/supabase-js'
 
@@ -110,31 +111,43 @@ async function downloadChannel(channelSlug) {
  * Download a single track using yt-dlp
  */
 async function downloadTrack(track, outputDir, prefix) {
+  // Load settings
+  const settings = await loadSettings()
+
   return new Promise((resolve, reject) => {
     const sanitizedTitle = sanitizeFilename(track.title || 'untitled')
     const output = path.join(outputDir, `${prefix}-${sanitizedTitle}.%(ext)s`)
 
     const args = [
-      '--format', config.ytdlp.format,
+      '--format', settings.ytdlp.format,
       '--extract-audio',
-      '--audio-format', config.ytdlp.audioFormat,
-      '--audio-quality', config.ytdlp.audioQuality,
+      '--audio-format', settings.ytdlp.audioFormat,
+      '--audio-quality', settings.ytdlp.audioQuality,
       '--output', output,
       '--no-playlist',
-      '--quiet',
-      '--progress',
+      '--newline',  // Progress on separate lines
     ]
 
-    if (config.ytdlp.addMetadata) {
-      args.push('--add-metadata')
-      args.push('--embed-thumbnail')
-    }
+    // Note: We don't add metadata or embed thumbnails to avoid downloading images
+    // User requested audio files only
 
     args.push(track.url)
 
     const proc = spawn('yt-dlp', args)
 
     let stderr = ''
+    let stdout = ''
+
+    proc.stdout.on('data', (data) => {
+      stdout += data.toString()
+      // Show progress
+      const lines = data.toString().trim().split('\n')
+      for (const line of lines) {
+        if (line.includes('[download]') || line.includes('ETA')) {
+          console.log(`    ${line}`)
+        }
+      }
+    })
 
     proc.stderr.on('data', (data) => {
       stderr += data.toString()
@@ -145,10 +158,12 @@ async function downloadTrack(track, outputDir, prefix) {
         resolve()
       } else {
         // Check if file already exists
-        if (stderr.includes('has already been downloaded')) {
+        if (stderr.includes('has already been downloaded') || stdout.includes('has already been downloaded')) {
           resolve()
         } else {
-          reject(new Error(`yt-dlp exited with code ${code}`))
+          // Include stderr in error message for debugging
+          const errorMsg = stderr.trim() || stdout.trim() || `yt-dlp exited with code ${code}`
+          reject(new Error(errorMsg))
         }
       }
     })

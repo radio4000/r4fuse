@@ -5,12 +5,13 @@ import { config } from './config.js'
 import { cachedCall } from './cache.js'
 import { queueDownload } from './download.js'
 import {
-  loadPreferences,
-  getPreferences,
+  loadSettings,
+  loadFavorites,
+  loadDownloads,
   addFavorite,
   removeFavorite,
-  addAutoSync,
-  removeAutoSync,
+  addDownload,
+  removeDownload,
 } from './preferences.js'
 
 // File type constants (from stat.h)
@@ -59,10 +60,11 @@ export async function initSDK() {
   sdk = createSdk(supabase)
   console.log('✓ Connected to Radio4000 API')
 
-  // Load user preferences
-  await loadPreferences()
-  const prefs = getPreferences()
-  console.log(`✓ Loaded preferences (${prefs.favorites.length} favorites, ${prefs.autoSync.length} auto-sync)`)
+  // Load user config files
+  await loadSettings()
+  const favorites = await loadFavorites()
+  const downloads = await loadDownloads()
+  console.log(`✓ Loaded config (${favorites.length} favorites, ${downloads.length} downloads)`)
 }
 
 /**
@@ -73,15 +75,7 @@ const structure = {
   '/HELP.txt': { type: 'file', mode: 0o444, content: '' },
   '/channels': { type: 'dir', mode: 0o755 },
   '/favorites': { type: 'dir', mode: 0o755 },
-  '/auto-sync': { type: 'dir', mode: 0o755 },
-  '/.ctrl': { type: 'dir', mode: 0o755 },
-  '/.ctrl/HELP.txt': { type: 'file', mode: 0o444, content: '' },
-  '/.ctrl/download': { type: 'file', mode: 0o666, content: '' },
-  '/.ctrl/cache': { type: 'file', mode: 0o666, content: '' },
-  '/.ctrl/favorite': { type: 'file', mode: 0o666, content: '' },
-  '/.ctrl/unfavorite': { type: 'file', mode: 0o666, content: '' },
-  '/.ctrl/autosync': { type: 'file', mode: 0o666, content: '' },
-  '/.ctrl/no-autosync': { type: 'file', mode: 0o666, content: '' },
+  '/downloads': { type: 'dir', mode: 0o755 },
 }
 
 /**
@@ -137,18 +131,13 @@ export async function getattr(path) {
     return stat({ mode: 0o755, size: 0, isDir: true })
   }
 
-  // /channels/<slug>/.ctrl
-  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === '.ctrl' && !parsed.file) {
-    return stat({ mode: 0o755, size: 0, isDir: true })
-  }
-
   // Files in channel root
   if (parsed.root === 'channels' && parsed.channel && parsed.subdir && !parsed.file) {
-    const validFiles = ['ABOUT.txt', 'info.txt', 'image.url', 'tracks.m3u', '.ctrl']
+    const validFiles = ['ABOUT.txt', 'image.url', 'tracks.m3u']
     if (validFiles.includes(parsed.subdir)) {
       const content = await getFileContent(path)
       return stat({
-        mode: parsed.subdir === '.ctrl' ? 0o755 : 0o444,
+        mode: 0o444,
         size: Buffer.byteLength(content),
         isDir: false,
       })
@@ -167,23 +156,18 @@ export async function getattr(path) {
     }
   }
 
-  // Control file in channel .ctrl directory
-  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === '.ctrl' && parsed.file === 'download') {
-    return stat({ mode: 0o666, size: 0, isDir: false })
-  }
-
   // /favorites/<slug> - symlinks to channels
   if (parsed.root === 'favorites' && parsed.channel && !parsed.subdir) {
     return stat({ mode: 0o755, size: 0, isDir: true })
   }
 
-  // /auto-sync/<slug> - symlinks to channels
-  if (parsed.root === 'auto-sync' && parsed.channel && !parsed.subdir) {
+  // /downloads/<slug> - symlinks to channels
+  if (parsed.root === 'downloads' && parsed.channel && !parsed.subdir) {
     return stat({ mode: 0o755, size: 0, isDir: true })
   }
 
-  // Files in favorites/<slug>/ or auto-sync/<slug>/
-  if ((parsed.root === 'favorites' || parsed.root === 'auto-sync') && parsed.channel && parsed.subdir) {
+  // Files in favorites/<slug>/ or downloads/<slug>/
+  if ((parsed.root === 'favorites' || parsed.root === 'downloads') && parsed.channel && parsed.subdir) {
     // Redirect to channels path
     const channelsPath = `/channels/${parsed.channel}/${parsed.subdir}${parsed.file ? '/' + parsed.file : ''}`
     return getattr(channelsPath)
@@ -200,7 +184,7 @@ export async function readdir(path) {
 
   // Root directory
   if (path === '/') {
-    return ['.', '..', 'HELP.txt', 'channels', 'favorites', 'auto-sync', '.ctrl']
+    return ['.', '..', 'HELP.txt', 'channels', 'favorites', 'downloads']
   }
 
   // /channels - list all channels
@@ -215,7 +199,7 @@ export async function readdir(path) {
 
   // /channels/<slug> - show channel contents
   if (parsed.root === 'channels' && parsed.channel && !parsed.subdir) {
-    return ['.', '..', 'ABOUT.txt', 'info.txt', 'image.url', 'tracks.m3u', 'tracks', '.ctrl']
+    return ['.', '..', 'ABOUT.txt', 'image.url', 'tracks.m3u', 'tracks']
   }
 
   // /channels/<slug>/tracks - list track files
@@ -236,25 +220,20 @@ export async function readdir(path) {
     return ['.', '..', ...files]
   }
 
-  // /channels/<slug>/.ctrl - control directory
-  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === '.ctrl') {
-    return ['.', '..', 'download']
-  }
-
   // /favorites - list favorite channels
   if (path === '/favorites') {
-    const prefs = getPreferences()
-    return ['.', '..', ...prefs.favorites]
+    const favorites = await loadFavorites()
+    return ['.', '..', ...favorites]
   }
 
-  // /auto-sync - list auto-sync channels
-  if (path === '/auto-sync') {
-    const prefs = getPreferences()
-    return ['.', '..', ...prefs.autoSync]
+  // /downloads - list channels marked for download
+  if (path === '/downloads') {
+    const downloads = await loadDownloads()
+    return ['.', '..', ...downloads]
   }
 
-  // Files in favorites/<slug>/ or auto-sync/<slug>/
-  if ((parsed.root === 'favorites' || parsed.root === 'auto-sync') && parsed.channel) {
+  // Files in favorites/<slug>/ or downloads/<slug>/
+  if ((parsed.root === 'favorites' || parsed.root === 'downloads') && parsed.channel) {
     // Redirect to channels path
     const channelsPath = `/channels/${parsed.channel}${parsed.subdir ? '/' + parsed.subdir : ''}`
     return readdir(channelsPath)
@@ -262,7 +241,7 @@ export async function readdir(path) {
 
   // /.ctrl directory
   if (path === '/.ctrl') {
-    return ['.', '..', 'HELP.txt', 'download', 'cache', 'favorite', 'unfavorite', 'autosync', 'no-autosync']
+    return ['.', '..', 'HELP.txt', 'download', 'cache', 'favorite', 'unfavorite', 'add-download', 'remove-download']
   }
 
   throw new Error('ENOENT')
@@ -274,8 +253,8 @@ export async function readdir(path) {
 export async function read(path, fd, buffer, length, position) {
   const parsed = parsePath(path)
 
-  // Redirect favorites/<slug>/* and auto-sync/<slug>/* to channels/<slug>/*
-  if ((parsed.root === 'favorites' || parsed.root === 'auto-sync') && parsed.channel) {
+  // Redirect favorites/<slug>/* and downloads/<slug>/* to channels/<slug>/*
+  if ((parsed.root === 'favorites' || parsed.root === 'downloads') && parsed.channel) {
     const channelsPath = `/channels/${parsed.channel}${parsed.subdir ? '/' + parsed.subdir : ''}${parsed.file ? '/' + parsed.file : ''}`
     return read(channelsPath, fd, buffer, length, position)
   }
@@ -302,16 +281,6 @@ export async function write(path, fd, buffer, length, position) {
     if (content) {
       await queueDownload(content)
       console.log(`✓ Queued download: ${content}`)
-    }
-    return length
-  }
-
-  // Channel-specific download control
-  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === '.ctrl' && parsed.file === 'download') {
-    const content = buffer.toString('utf-8', 0, length).trim()
-    if (content === 'start' || content === '1') {
-      await queueDownload(parsed.channel)
-      console.log(`✓ Queued download: ${parsed.channel}`)
     }
     return length
   }
@@ -345,20 +314,20 @@ export async function write(path, fd, buffer, length, position) {
     return length
   }
 
-  // Add to auto-sync
-  if (path === '/.ctrl/autosync') {
+  // Add to downloads
+  if (path === '/.ctrl/add-download') {
     const content = buffer.toString('utf-8', 0, length).trim()
     if (content) {
-      await addAutoSync(content)
+      await addDownload(content)
     }
     return length
   }
 
-  // Remove from auto-sync
-  if (path === '/.ctrl/no-autosync') {
+  // Remove from downloads
+  if (path === '/.ctrl/remove-download') {
     const content = buffer.toString('utf-8', 0, length).trim()
     if (content) {
-      await removeAutoSync(content)
+      await removeDownload(content)
     }
     return length
   }
@@ -377,19 +346,29 @@ async function getFileContent(path) {
     return `r4fuse - Radio4000 FUSE Filesystem
 =====================================
 
-This is a READ-ONLY filesystem showing Radio4000 channels and tracks.
-
 Quick Start:
   ls channels/                  # Browse all channels
   cat channels/oskar/ABOUT.txt  # Read about a channel
-  ls favorites/                 # Your favorite channels
-  cat .ctrl/HELP.txt            # Control file help
 
-The filesystem is read-only to keep organization simple.
-Use control files in .ctrl/ to perform actions like downloading.
+  # View favorites and downloads
+  ls favorites/                 # View favorite channels
+  ls downloads/                 # View channels marked for download
 
-See PREFERENCES.md and HOW_IT_WORKS.md in the project directory
-for complete documentation.
+Configuration:
+  All settings are stored in: ~/.config/r4fuse/
+
+  settings.json   # yt-dlp options, mount settings
+  favorites.txt   # Favorite channels (one per line)
+  downloads.txt   # Channels to auto-download (one per line)
+
+  Edit these files directly with any text editor!
+  Changes take effect on next mount.
+
+Advanced:
+  Use .ctrl/ files for programmatic control without config editing.
+  See .ctrl/HELP.txt for details.
+
+See README.md in the project directory for complete documentation.
 `
   }
 
@@ -399,29 +378,32 @@ for complete documentation.
 ============================
 
 Control files let you perform actions by writing to them.
-The filesystem itself is READ-ONLY for safety and organization.
+The filesystem itself is READ-ONLY for browsing.
 
 Usage: echo "value" > control-file
 
 Available Commands:
-  echo "oskar" > download      # Download channel to ~/Music/radio4000/
-  echo "oskar" > favorite       # Add to favorites
-  echo "oskar" > unfavorite     # Remove from favorites
-  echo "oskar" > autosync       # Mark for auto-sync
-  echo "oskar" > no-autosync    # Remove from auto-sync
-  echo "clear" > cache          # Clear API cache
+  echo "oskar" > download         # Download channel to ~/Music/radio4000/
+  echo "oskar" > favorite         # Add to favorites
+  echo "oskar" > unfavorite       # Remove from favorites
+  echo "oskar" > add-download     # Mark channel for auto-download
+  echo "oskar" > remove-download  # Remove from auto-download
+  echo "clear" > cache            # Clear API cache
 
 Examples:
-  # Download a channel
+  # Download a channel immediately
   echo "ko002" > .ctrl/download
 
-  # Add to favorites
-  echo "oskar" > .ctrl/favorite
+  # Add to auto-download list
+  echo "oskar" > .ctrl/add-download
 
-  # Then access via favorites/
-  ls ../favorites/oskar/
+  # Then access via downloads/
+  ls ../downloads/oskar/
 
-Preferences are saved to: ~/.config/r4fuse/preferences.json
+Configuration stored in: ~/.config/r4fuse/
+  - favorites.txt
+  - downloads.txt
+  - settings.json
 `
   }
 
@@ -460,23 +442,7 @@ Actions:
 `
   }
 
-  // info.txt - channel metadata
-  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'info.txt') {
-    const channel = await cachedCall(`channel:${parsed.channel}`, async () => {
-      const { data, error } = await sdk.channels.readChannel(parsed.channel)
-      if (error) throw new Error(error.message)
-      return data
-    })
-
-    return `Name: ${channel.name || 'Untitled'}
-Slug: ${channel.slug}
-Created: ${channel.created_at}
-Description: ${channel.description || 'No description'}
-URL: ${channel.url || 'N/A'}
-`
-  }
-
-  // image.url - full CDN URL
+  // image.url - Cloudinary CDN URL
   if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'image.url') {
     const channel = await cachedCall(`channel:${parsed.channel}`, async () => {
       const { data, error } = await sdk.channels.readChannel(parsed.channel)
@@ -484,7 +450,11 @@ URL: ${channel.url || 'N/A'}
       return data
     })
     if (channel.image) {
-      // Construct full Supabase storage URL
+      // Check if it's already a full URL (Cloudinary)
+      if (channel.image.startsWith('http')) {
+        return `${channel.image}\n`
+      }
+      // Otherwise construct Supabase storage URL
       const storageUrl = config.supabase.url.replace(/\/$/, '')
       return `${storageUrl}/storage/v1/object/public/channels/${channel.image}\n`
     }
@@ -573,15 +543,15 @@ function sanitizeFilename(str) {
 }
 
 /**
- * Open file (no-op, but required)
+ * Open file
  */
 export async function open(path, flags) {
-  // Return a fake file descriptor
+  // Return a fake file descriptor for all files
   return 0
 }
 
 /**
- * Release file (no-op)
+ * Release file
  */
 export async function release(path, fd) {
   return 0

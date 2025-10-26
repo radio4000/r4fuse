@@ -1,6 +1,8 @@
 import Fuse from 'fuse-native'
 import { config, ensureDirectories, loadUserConfig } from './config.js'
 import * as fs from './filesystem.js'
+import { queueDownload } from './download.js'
+import { loadDownloads } from './preferences.js'
 
 let fuse = null
 
@@ -21,6 +23,9 @@ export async function mount() {
   console.log(`Downloads:   ${config.downloadDir}`)
   console.log(`Cache:       ${config.cacheDir}`)
   console.log('')
+
+  // Load downloads for auto-download
+  const downloads = await loadDownloads()
 
   // Create FUSE filesystem
   fuse = new Fuse(config.mountPoint, {
@@ -61,7 +66,7 @@ export async function mount() {
     },
 
     truncate: (path, size, cb) => {
-      // Allow truncate on control files
+      // Allow truncate on .ctrl files only
       if (path.includes('/.ctrl/')) {
         cb(0)
       } else {
@@ -92,6 +97,17 @@ export async function mount() {
     console.log(`  mpv --playlist=${config.mountPoint}/channels/tonitonirock/tracks.m3u`)
     console.log(`  echo "tonitonirock" > ${config.mountPoint}/.ctrl/download`)
     console.log('\nPress Ctrl+C to unmount\n')
+
+    // Auto-download: download channels marked for auto-download
+    if (downloads.length > 0) {
+      console.log(`🔄 Auto-download enabled for ${downloads.length} channel(s): ${downloads.join(', ')}`)
+      console.log('   Starting downloads in background...\n')
+
+      // Queue downloads for all channels in downloads.txt
+      for (const channelSlug of downloads) {
+        queueDownload(channelSlug)
+      }
+    }
   })
 
   // Handle shutdown

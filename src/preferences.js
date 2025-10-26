@@ -3,78 +3,111 @@ import path from 'path'
 import { config } from './config.js'
 
 /**
- * User preferences structure
+ * Get config directory path
  */
-const defaultPreferences = {
-  version: 1,
-  myChannels: [],           // Your own channel slugs
-  favorites: [],            // Favorite channel slugs
-  autoSync: [],             // Channels to auto-download on mount
-  syncSettings: {
-    onMount: false,         // Auto-sync on mount
-    interval: null,         // Auto-sync interval in minutes (null = disabled)
-  },
-  downloadSettings: {
-    format: 'bestaudio',
-    audioFormat: 'mp3',
-    audioQuality: '192K',
-  }
+function getConfigDir() {
+  return path.dirname(config.configFile)
 }
 
-let prefs = null
-
 /**
- * Load user preferences
+ * Load settings.json
  */
-export async function loadPreferences() {
-  const prefsFile = path.join(path.dirname(config.configFile), 'preferences.json')
+export async function loadSettings() {
+  const settingsFile = path.join(getConfigDir(), 'settings.json')
 
-  try {
-    const data = await fs.readFile(prefsFile, 'utf-8')
-    prefs = { ...defaultPreferences, ...JSON.parse(data) }
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      // File doesn't exist, use defaults
-      prefs = { ...defaultPreferences }
-      await savePreferences()
-    } else {
-      console.error('Error loading preferences:', err.message)
-      prefs = { ...defaultPreferences }
+  const defaultSettings = {
+    ytdlp: {
+      format: 'bestaudio/best',
+      audioFormat: 'mp3',
+      audioQuality: '0',  // Highest quality VBR
+      addMetadata: false,  // Don't embed thumbnails
+    },
+    mount: {
+      debug: false,
     }
   }
 
-  return prefs
+  try {
+    const data = await fs.readFile(settingsFile, 'utf-8')
+    return { ...defaultSettings, ...JSON.parse(data) }
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      await fs.mkdir(getConfigDir(), { recursive: true })
+      await fs.writeFile(settingsFile, JSON.stringify(defaultSettings, null, 2))
+      return defaultSettings
+    }
+    throw err
+  }
 }
 
 /**
- * Save user preferences
+ * Load favorites.txt - one channel slug per line
  */
-export async function savePreferences() {
-  if (!prefs) return
+export async function loadFavorites() {
+  const favoritesFile = path.join(getConfigDir(), 'favorites.txt')
 
-  const prefsFile = path.join(path.dirname(config.configFile), 'preferences.json')
-  const prefsDir = path.dirname(prefsFile)
-
-  await fs.mkdir(prefsDir, { recursive: true })
-  await fs.writeFile(prefsFile, JSON.stringify(prefs, null, 2), 'utf-8')
+  try {
+    const data = await fs.readFile(favoritesFile, 'utf-8')
+    return data.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      await fs.mkdir(getConfigDir(), { recursive: true })
+      await fs.writeFile(favoritesFile, '')
+      return []
+    }
+    throw err
+  }
 }
 
 /**
- * Get current preferences
+ * Save favorites.txt
  */
-export function getPreferences() {
-  return prefs || defaultPreferences
+export async function saveFavorites(favorites) {
+  const favoritesFile = path.join(getConfigDir(), 'favorites.txt')
+  await fs.mkdir(getConfigDir(), { recursive: true })
+  await fs.writeFile(favoritesFile, favorites.join('\n') + (favorites.length > 0 ? '\n' : ''))
+}
+
+/**
+ * Load downloads.txt - one channel slug per line
+ */
+export async function loadDownloads() {
+  const downloadsFile = path.join(getConfigDir(), 'downloads.txt')
+
+  try {
+    const data = await fs.readFile(downloadsFile, 'utf-8')
+    return data.split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      await fs.mkdir(getConfigDir(), { recursive: true })
+      await fs.writeFile(downloadsFile, '')
+      return []
+    }
+    throw err
+  }
+}
+
+/**
+ * Save downloads.txt
+ */
+export async function saveDownloads(downloads) {
+  const downloadsFile = path.join(getConfigDir(), 'downloads.txt')
+  await fs.mkdir(getConfigDir(), { recursive: true })
+  await fs.writeFile(downloadsFile, downloads.join('\n') + (downloads.length > 0 ? '\n' : ''))
 }
 
 /**
  * Add a channel to favorites
  */
 export async function addFavorite(channelSlug) {
-  if (!prefs) await loadPreferences()
-
-  if (!prefs.favorites.includes(channelSlug)) {
-    prefs.favorites.push(channelSlug)
-    await savePreferences()
+  const favorites = await loadFavorites()
+  if (!favorites.includes(channelSlug)) {
+    favorites.push(channelSlug)
+    await saveFavorites(favorites)
     console.log(`⭐ Added to favorites: ${channelSlug}`)
     return true
   }
@@ -85,12 +118,11 @@ export async function addFavorite(channelSlug) {
  * Remove a channel from favorites
  */
 export async function removeFavorite(channelSlug) {
-  if (!prefs) await loadPreferences()
-
-  const index = prefs.favorites.indexOf(channelSlug)
+  const favorites = await loadFavorites()
+  const index = favorites.indexOf(channelSlug)
   if (index > -1) {
-    prefs.favorites.splice(index, 1)
-    await savePreferences()
+    favorites.splice(index, 1)
+    await saveFavorites(favorites)
     console.log(`♡ Removed from favorites: ${channelSlug}`)
     return true
   }
@@ -98,31 +130,29 @@ export async function removeFavorite(channelSlug) {
 }
 
 /**
- * Add a channel to auto-sync
+ * Add a channel to downloads
  */
-export async function addAutoSync(channelSlug) {
-  if (!prefs) await loadPreferences()
-
-  if (!prefs.autoSync.includes(channelSlug)) {
-    prefs.autoSync.push(channelSlug)
-    await savePreferences()
-    console.log(`🔄 Added to auto-sync: ${channelSlug}`)
+export async function addDownload(channelSlug) {
+  const downloads = await loadDownloads()
+  if (!downloads.includes(channelSlug)) {
+    downloads.push(channelSlug)
+    await saveDownloads(downloads)
+    console.log(`📥 Added to downloads: ${channelSlug}`)
     return true
   }
   return false
 }
 
 /**
- * Remove a channel from auto-sync
+ * Remove a channel from downloads
  */
-export async function removeAutoSync(channelSlug) {
-  if (!prefs) await loadPreferences()
-
-  const index = prefs.autoSync.indexOf(channelSlug)
+export async function removeDownload(channelSlug) {
+  const downloads = await loadDownloads()
+  const index = downloads.indexOf(channelSlug)
   if (index > -1) {
-    prefs.autoSync.splice(index, 1)
-    await savePreferences()
-    console.log(`⊘ Removed from auto-sync: ${channelSlug}`)
+    downloads.splice(index, 1)
+    await saveDownloads(downloads)
+    console.log(`⊘ Removed from downloads: ${channelSlug}`)
     return true
   }
   return false
@@ -131,13 +161,15 @@ export async function removeAutoSync(channelSlug) {
 /**
  * Check if a channel is in favorites
  */
-export function isFavorite(channelSlug) {
-  return prefs?.favorites.includes(channelSlug) || false
+export async function isFavorite(channelSlug) {
+  const favorites = await loadFavorites()
+  return favorites.includes(channelSlug)
 }
 
 /**
- * Check if a channel is in auto-sync
+ * Check if a channel is in downloads
  */
-export function isAutoSync(channelSlug) {
-  return prefs?.autoSync.includes(channelSlug) || false
+export async function isDownload(channelSlug) {
+  const downloads = await loadDownloads()
+  return downloads.includes(channelSlug)
 }
