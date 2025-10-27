@@ -5,9 +5,12 @@ import { config } from './config.js'
 import { loadSettings } from './preferences.js'
 import { createSdk } from '@radio4000/sdk'
 import { createClient } from '@supabase/supabase-js'
+import NodeID3 from 'node-id3'
 
 const queue = []
 let isProcessing = false
+let isShuttingDown = false
+let currentDownloadProcess = null
 
 // Initialize SDK
 let sdk = null
@@ -37,7 +40,7 @@ export async function queueDownload(channelSlug) {
  * Process download queue
  */
 async function processQueue() {
-  if (queue.length === 0) {
+  if (isShuttingDown || queue.length === 0) {
     isProcessing = false
     return
   }
@@ -51,11 +54,15 @@ async function processQueue() {
     await downloadChannel(channelSlug)
     console.log(`✓ Completed: ${channelSlug}`)
   } catch (err) {
-    console.error(`✗ Failed to download ${channelSlug}:`, err.message)
+    if (!isShuttingDown) {
+      console.error(`✗ Failed to download ${channelSlug}:`, err.message)
+    }
   }
 
   // Process next in queue
-  setTimeout(() => processQueue(), 1000)
+  if (!isShuttingDown) {
+    setTimeout(() => processQueue(), 1000)
+  }
 }
 
 /**
@@ -78,6 +85,10 @@ async function downloadChannel(channelSlug) {
   // Create channel directory
   const channelDir = path.join(config.downloadDir, channelSlug)
   await fs.mkdir(channelDir, { recursive: true })
+
+  // Create tracks subdirectory (for organizing files)
+  const tracksDir = path.join(channelDir, 'tracks')
+  await fs.mkdir(tracksDir, { recursive: true })
 
   // Load or create status tracking
   const status = await loadStatus(channelDir)
@@ -108,13 +119,16 @@ async function downloadChannel(channelSlug) {
     }
 
     try {
-      const wasDownloaded = await downloadTrack(track, channelDir, prefix)
-      if (wasDownloaded) {
+      const downloadedFile = await downloadTrack(track, tracksDir, prefix)
+      if (downloadedFile) {
+        // Write ID3 metadata to the downloaded file
+        await writeTrackMetadata(downloadedFile, track, i + 1)
+
         status.downloaded.push(trackId)
         await appendDebugLog(debugLog, `[${i + 1}] OK: ${track.title}`)
         success++
       } else {
-        // File already exists (detected by yt-dlp)
+        // File already exists (detected by downloader)
         status.downloaded.push(trackId)
         await appendDebugLog(debugLog, `[${i + 1}] EXISTS: ${track.title}`)
         skipped++
@@ -134,7 +148,13 @@ async function downloadChannel(channelSlug) {
   }
 
   // Create local m3u playlist
-  await createLocalPlaylist(channelSlug, channelDir, tracks)
+  await createLocalPlaylist(channelSlug, tracksDir, tracks)
+
+  // Organize by tags if enabled
+  const settings = await loadSettings()
+  if (settings.features && settings.features.organizeByTags) {
+    await organizeByTags(channelDir, tracksDir, tracks)
+  }
 
   // Final summary
   await appendDebugLog(debugLog, `\nSession complete: ${success} downloaded, ${skipped} skipped, ${failed} failed`)
@@ -148,7 +168,8 @@ async function downloadChannel(channelSlug) {
 }
 
 /**
- * Download a single track using yt-dlp
+ * Download a single track using yt-dlp or youtube-dl
+ * Returns the path to the downloaded file if successful, or null if file already existed
  */
 async function downloadTrack(track, outputDir, prefix) {
   // Load settings
@@ -156,27 +177,33 @@ async function downloadTrack(track, outputDir, prefix) {
 
   return new Promise((resolve, reject) => {
     const sanitizedTitle = sanitizeFilename(track.title || 'untitled')
-    const output = path.join(outputDir, `${prefix}-${sanitizedTitle}.%(ext)s`)
+    const outputTemplate = path.join(outputDir, `${prefix}-${sanitizedTitle}.%(ext)s`)
+
+    // Choose downloader (yt-dlp or youtube-dl)
+    const downloader = settings.downloader || 'yt-dlp'
 
     const args = [
       '--format', settings.ytdlp.format,
       '--extract-audio',
       '--audio-format', settings.ytdlp.audioFormat,
       '--audio-quality', settings.ytdlp.audioQuality,
-      '--output', output,
+      '--output', outputTemplate,
       '--no-playlist',
       '--newline',  // Progress on separate lines
     ]
 
-    // Note: We don't add metadata or embed thumbnails to avoid downloading images
-    // User requested audio files only
+    // Note: We don't add metadata with downloader as we'll add it ourselves with node-id3
 
     args.push(track.url)
 
-    const proc = spawn('yt-dlp', args)
+    const proc = spawn(downloader, args)
+
+    // Track the current process for cleanup
+    currentDownloadProcess = proc
 
     let stderr = ''
     let stdout = ''
+    let downloadedFile = null
 
     proc.stdout.on('data', (data) => {
       stdout += data.toString()
@@ -186,6 +213,20 @@ async function downloadTrack(track, outputDir, prefix) {
         if (line.includes('[download]') || line.includes('ETA')) {
           console.log(`    ${line}`)
         }
+        // Capture the destination filename
+        if (line.includes('[download] Destination:')) {
+          const match = line.match(/\[download\] Destination: (.+)/)
+          if (match) {
+            downloadedFile = match[1].trim()
+          }
+        }
+        // Also check for "has already been downloaded" which includes filename
+        if (line.includes('has already been downloaded')) {
+          const match = line.match(/\[download\] (.+) has already been downloaded/)
+          if (match) {
+            downloadedFile = match[1].trim()
+          }
+        }
       }
     })
 
@@ -193,16 +234,35 @@ async function downloadTrack(track, outputDir, prefix) {
       stderr += data.toString()
     })
 
-    proc.on('close', (code) => {
+    proc.on('close', async (code) => {
+      // Clear current process tracker
+      if (currentDownloadProcess === proc) {
+        currentDownloadProcess = null
+      }
+
+      // If shutting down, resolve without error
+      if (isShuttingDown) {
+        resolve(null)
+        return
+      }
+
       if (code === 0) {
-        resolve(true) // Successfully downloaded
+        // Try to find the downloaded file if we didn't capture it from output
+        if (!downloadedFile) {
+          const files = await fs.readdir(outputDir)
+          const matchingFile = files.find(f => f.startsWith(`${prefix}-${sanitizedTitle}`))
+          if (matchingFile) {
+            downloadedFile = path.join(outputDir, matchingFile)
+          }
+        }
+        resolve(downloadedFile) // Successfully downloaded
       } else {
         // Check if file already exists
         if (stderr.includes('has already been downloaded') || stdout.includes('has already been downloaded')) {
-          resolve(false) // File exists, didn't download
+          resolve(null) // File exists, didn't download
         } else {
           // Include stderr in error message for debugging
-          const errorMsg = stderr.trim() || stdout.trim() || `yt-dlp exited with code ${code}`
+          const errorMsg = stderr.trim() || stdout.trim() || `${downloader} exited with code ${code}`
           reject(new Error(errorMsg))
         }
       }
@@ -210,12 +270,58 @@ async function downloadTrack(track, outputDir, prefix) {
 
     proc.on('error', (err) => {
       if (err.code === 'ENOENT') {
-        reject(new Error('yt-dlp not found. Please install it: https://github.com/yt-dlp/yt-dlp'))
+        reject(new Error(`${downloader} not found. Please install it.`))
       } else {
         reject(err)
       }
     })
   })
+}
+
+/**
+ * Write ID3 metadata to downloaded track
+ */
+async function writeTrackMetadata(filePath, track, trackNumber) {
+  try {
+    // Parse artist and title from track title
+    // Common formats: "Artist - Title" or just "Title"
+    let artist = ''
+    let title = track.title || 'Untitled'
+
+    if (title.includes(' - ')) {
+      const parts = title.split(' - ')
+      artist = parts[0].trim()
+      title = parts.slice(1).join(' - ').trim()
+    }
+
+    const tags = {
+      title: title,
+      artist: artist || 'Unknown Artist',
+      comment: {
+        language: 'eng',
+        text: track.description || ''
+      },
+      trackNumber: trackNumber.toString(),
+      year: track.created_at ? new Date(track.created_at).getFullYear().toString() : '',
+      WOAF: track.url, // Official audio file webpage
+    }
+
+    // Add Discogs URL if available
+    if (track.discogs_url) {
+      tags.userDefinedText = [{
+        description: 'DISCOGS_URL',
+        value: track.discogs_url
+      }]
+    }
+
+    // Write tags
+    const success = NodeID3.write(tags, filePath)
+    if (!success) {
+      console.log(`    Warning: Could not write ID3 tags to ${path.basename(filePath)}`)
+    }
+  } catch (err) {
+    console.error(`    Warning: Error writing ID3 metadata: ${err.message}`)
+  }
 }
 
 /**
@@ -295,6 +401,187 @@ async function appendDebugLog(debugFile, message) {
   const timestamp = new Date().toISOString()
   const line = `[${timestamp}] ${message}\n`
   await fs.appendFile(debugFile, line)
+}
+
+/**
+ * Organize tracks by tags using symlinks
+ */
+async function organizeByTags(channelDir, tracksDir, tracks) {
+  console.log('  📂 Organizing tracks by tags...')
+
+  // Create tags directory
+  const tagsDir = path.join(channelDir, 'tags')
+  await fs.mkdir(tagsDir, { recursive: true })
+
+  // Collect all tags from tracks
+  const tagMap = new Map()
+
+  for (let i = 0; i < tracks.length; i++) {
+    const track = tracks[i]
+    const prefix = String(i + 1).padStart(3, '0')
+    const sanitizedTitle = sanitizeFilename(track.title || 'untitled')
+
+    // Find the actual downloaded file
+    const files = await fs.readdir(tracksDir)
+    const trackFile = files.find(f => f.startsWith(`${prefix}-${sanitizedTitle}`))
+
+    if (!trackFile) continue
+
+    // Parse tags from track description or title
+    const tags = extractTags(track)
+
+    if (tags.length === 0) {
+      // If no tags, add to 'untagged' folder
+      tags.push('untagged')
+    }
+
+    // Create symlinks for each tag
+    for (const tag of tags) {
+      if (!tagMap.has(tag)) {
+        tagMap.set(tag, [])
+      }
+      tagMap.get(tag).push({ file: trackFile, track })
+    }
+  }
+
+  // Create tag directories and symlinks
+  for (const [tag, trackFiles] of tagMap.entries()) {
+    const tagDir = path.join(tagsDir, sanitizeFilename(tag))
+    await fs.mkdir(tagDir, { recursive: true })
+
+    for (const { file } of trackFiles) {
+      const sourcePath = path.join(tracksDir, file)
+      const linkPath = path.join(tagDir, file)
+
+      try {
+        // Remove existing symlink if it exists
+        try {
+          await fs.unlink(linkPath)
+        } catch (err) {
+          if (err.code !== 'ENOENT') throw err
+        }
+
+        // Create relative symlink
+        const relativePath = path.relative(tagDir, sourcePath)
+        await fs.symlink(relativePath, linkPath)
+      } catch (err) {
+        console.error(`    Warning: Could not create symlink for ${file}: ${err.message}`)
+      }
+    }
+  }
+
+  console.log(`  ✓ Organized into ${tagMap.size} tag folders`)
+}
+
+/**
+ * Extract tags from track metadata
+ * Tags can come from description field (hashtags) or from structured metadata
+ */
+function extractTags(track) {
+  const tags = []
+
+  // Check description for hashtags
+  if (track.description) {
+    const hashtags = track.description.match(/#[\w]+/g)
+    if (hashtags) {
+      tags.push(...hashtags.map(tag => tag.substring(1).toLowerCase()))
+    }
+  }
+
+  // Check if track has a tags field (if supported by API)
+  if (track.tags && Array.isArray(track.tags)) {
+    tags.push(...track.tags.map(tag => tag.toLowerCase()))
+  }
+
+  // Remove duplicates
+  return [...new Set(tags)]
+}
+
+/**
+ * Sync channel directory using rsync
+ */
+export async function syncChannel(channelSlug, destination) {
+  const settings = await loadSettings()
+
+  if (!settings.features || !settings.features.rsyncEnabled) {
+    console.log('  ⊘ rsync sync is disabled in settings')
+    return
+  }
+
+  const channelDir = path.join(config.downloadDir, channelSlug)
+
+  return new Promise((resolve, reject) => {
+    console.log(`  🔄 Syncing ${channelSlug} to ${destination}...`)
+
+    const args = [
+      '-avz',           // archive, verbose, compress
+      '--progress',     // show progress
+      '--delete',       // delete files that don't exist in source
+      `${channelDir}/`, // source (trailing slash is important)
+      destination       // destination
+    ]
+
+    const proc = spawn('rsync', args)
+
+    proc.stdout.on('data', (data) => {
+      console.log(`    ${data.toString().trim()}`)
+    })
+
+    proc.stderr.on('data', (data) => {
+      console.error(`    ${data.toString().trim()}`)
+    })
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        console.log(`  ✓ Sync completed`)
+        resolve()
+      } else {
+        reject(new Error(`rsync exited with code ${code}`))
+      }
+    })
+
+    proc.on('error', (err) => {
+      if (err.code === 'ENOENT') {
+        reject(new Error('rsync not found. Please install rsync.'))
+      } else {
+        reject(err)
+      }
+    })
+  })
+}
+
+/**
+ * Stop all downloads and cleanup
+ */
+export async function stopDownloads() {
+  console.log('\n⏹  Stopping downloads...')
+
+  // Set shutdown flag to stop queue processing
+  isShuttingDown = true
+
+  // Clear the queue
+  const queuedCount = queue.length
+  queue.length = 0
+
+  if (queuedCount > 0) {
+    console.log(`  Cleared ${queuedCount} queued download(s)`)
+  }
+
+  // Kill current download process if running
+  if (currentDownloadProcess) {
+    try {
+      currentDownloadProcess.kill('SIGTERM')
+      console.log('  Stopped active download')
+    } catch (err) {
+      // Process might have already ended
+    }
+    currentDownloadProcess = null
+  }
+
+  // Wait a bit for processes to clean up
+  await new Promise(resolve => setTimeout(resolve, 100))
+
+  console.log('✓ Downloads stopped')
 }
 
 /**

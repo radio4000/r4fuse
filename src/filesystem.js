@@ -3,7 +3,7 @@ import { createSdk } from '@radio4000/sdk'
 import { createClient } from '@supabase/supabase-js'
 import { config } from './config.js'
 import { cachedCall } from './cache.js'
-import { queueDownload } from './download.js'
+import { queueDownload, syncChannel } from './download.js'
 import {
   loadSettings,
   loadFavorites,
@@ -89,6 +89,7 @@ function parsePath(path) {
     channel: parts[1],
     subdir: parts[2],
     file: parts[3],
+    file2: parts[4], // For deeper nesting like /channels/slug/tags/tagname/file.txt
   }
 }
 
@@ -131,6 +132,16 @@ export async function getattr(path) {
     return stat({ mode: 0o755, size: 0, isDir: true })
   }
 
+  // /channels/<slug>/tags
+  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tags' && !parsed.file) {
+    return stat({ mode: 0o755, size: 0, isDir: true })
+  }
+
+  // /channels/<slug>/tags/<tagname>
+  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tags' && parsed.file && !parsed.file2) {
+    return stat({ mode: 0o755, size: 0, isDir: true })
+  }
+
   // Files in channel root
   if (parsed.root === 'channels' && parsed.channel && parsed.subdir && !parsed.file) {
     const validFiles = ['ABOUT.txt', 'image.url', 'tracks.m3u']
@@ -145,14 +156,71 @@ export async function getattr(path) {
   }
 
   // Track files: /channels/<slug>/tracks/<file>
-  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tracks' && parsed.file) {
-    if (parsed.file.endsWith('.txt') || parsed.file === 'tracks.json') {
+  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tracks' && parsed.file && !parsed.file2) {
+    if (parsed.file === 'tracks.json') {
       const content = await getFileContent(path)
       return stat({
         mode: 0o444,
         size: Buffer.byteLength(content),
         isDir: false,
       })
+    }
+    if (parsed.file.endsWith('.txt')) {
+      // Find the track by matching the sanitized filename
+      const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
+        const { data, error } = await sdk.channels.readChannelTracks(parsed.channel)
+        if (error) throw new Error(error.message)
+        return data
+      })
+
+      const orderedTracks = [...tracks].reverse()
+      const filename = parsed.file.replace(/\.txt$/, '')
+      const track = orderedTracks.find(t => sanitizeFilename(t.title || 'untitled') === filename)
+
+      if (track) {
+        const content = await getFileContent(path)
+        return stat({
+          mode: 0o444,
+          size: Buffer.byteLength(content),
+          isDir: false,
+          mtime: track.updated_at ? new Date(track.updated_at) : undefined,
+          ctime: track.created_at ? new Date(track.created_at) : undefined,
+          atime: track.updated_at ? new Date(track.updated_at) : undefined,
+        })
+      }
+    }
+  }
+
+  // Track files in tags: /channels/<slug>/tags/<tagname>/<file>
+  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tags' && parsed.file && parsed.file2) {
+    if (parsed.file2.endsWith('.txt')) {
+      // Find the track by matching the sanitized filename
+      const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
+        const { data, error } = await sdk.channels.readChannelTracks(parsed.channel)
+        if (error) throw new Error(error.message)
+        return data
+      })
+
+      const orderedTracks = [...tracks].reverse()
+      const filename = parsed.file2.replace(/\.txt$/, '')
+      const track = orderedTracks.find(t => sanitizeFilename(t.title || 'untitled') === filename)
+
+      if (track) {
+        // Verify this track has the tag
+        const tags = extractTagsFromTrack(track)
+        const trackTags = tags.length > 0 ? tags : ['untagged']
+        if (trackTags.includes(parsed.file)) {
+          const content = await getFileContent(path)
+          return stat({
+            mode: 0o444,
+            size: Buffer.byteLength(content),
+            isDir: false,
+            mtime: track.updated_at ? new Date(track.updated_at) : undefined,
+            ctime: track.created_at ? new Date(track.created_at) : undefined,
+            atime: track.updated_at ? new Date(track.updated_at) : undefined,
+          })
+        }
+      }
     }
   }
 
@@ -199,11 +267,11 @@ export async function readdir(path) {
 
   // /channels/<slug> - show channel contents
   if (parsed.root === 'channels' && parsed.channel && !parsed.subdir) {
-    return ['.', '..', 'ABOUT.txt', 'image.url', 'tracks.m3u', 'tracks']
+    return ['.', '..', 'ABOUT.txt', 'image.url', 'tracks.m3u', 'tracks', 'tags']
   }
 
   // /channels/<slug>/tracks - list track files
-  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tracks') {
+  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tracks' && !parsed.file) {
     const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
       const { data, error } = await sdk.channels.readChannelTracks(parsed.channel)
       if (error) throw new Error(error.message)
@@ -213,10 +281,60 @@ export async function readdir(path) {
     const orderedTracks = [...tracks].reverse()
     const files = ['tracks.json']
     for (let i = 0; i < orderedTracks.length; i++) {
-      const prefix = String(i + 1).padStart(3, '0')
       const name = sanitizeFilename(orderedTracks[i].title || 'untitled')
-      files.push(`${prefix}-${name}.txt`)
+      // No numeric prefix - users can sort by timestamp
+      files.push(`${name}.txt`)
     }
+    return ['.', '..', ...files]
+  }
+
+  // /channels/<slug>/tags - list tag directories
+  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tags' && !parsed.file) {
+    const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
+      const { data, error } = await sdk.channels.readChannelTracks(parsed.channel)
+      if (error) throw new Error(error.message)
+      return data
+    })
+
+    // Collect all unique tags
+    const tagSet = new Set()
+    for (const track of tracks) {
+      const tags = extractTagsFromTrack(track)
+      if (tags.length === 0) {
+        tagSet.add('untagged')
+      } else {
+        tags.forEach(tag => tagSet.add(tag))
+      }
+    }
+
+    return ['.', '..', ...Array.from(tagSet).sort()]
+  }
+
+  // /channels/<slug>/tags/<tag> - list tracks with this tag
+  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tags' && parsed.file && !path.split('/')[5]) {
+    const tagName = parsed.file
+    const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
+      const { data, error } = await sdk.channels.readChannelTracks(parsed.channel)
+      if (error) throw new Error(error.message)
+      return data
+    })
+
+    // Reverse tracks so oldest (first added) is #1
+    const orderedTracks = [...tracks].reverse()
+    const files = []
+
+    for (let i = 0; i < orderedTracks.length; i++) {
+      const track = orderedTracks[i]
+      const tags = extractTagsFromTrack(track)
+      const trackTags = tags.length > 0 ? tags : ['untagged']
+
+      if (trackTags.includes(tagName)) {
+        const name = sanitizeFilename(track.title || 'untitled')
+        // No numeric prefix - users can sort by timestamp
+        files.push(`${name}.txt`)
+      }
+    }
+
     return ['.', '..', ...files]
   }
 
@@ -241,7 +359,7 @@ export async function readdir(path) {
 
   // /.ctrl directory
   if (path === '/.ctrl') {
-    return ['.', '..', 'HELP.txt', 'download', 'cache', 'favorite', 'unfavorite', 'add-download', 'remove-download']
+    return ['.', '..', 'HELP.txt', 'download', 'cache', 'favorite', 'unfavorite', 'add-download', 'remove-download', 'sync']
   }
 
   throw new Error('ENOENT')
@@ -332,6 +450,22 @@ export async function write(path, fd, buffer, length, position) {
     return length
   }
 
+  // Rsync sync
+  if (path === '/.ctrl/sync') {
+    const content = buffer.toString('utf-8', 0, length).trim()
+    if (content) {
+      // Expected format: "channelSlug destination"
+      const [channelSlug, destination] = content.split(' ', 2)
+      if (channelSlug && destination) {
+        syncChannel(channelSlug, destination).catch(err => {
+          console.error(`Sync error: ${err.message}`)
+        })
+        console.log(`✓ Started sync: ${channelSlug} -> ${destination}`)
+      }
+    }
+    return length
+  }
+
   throw new Error('EROFS')
 }
 
@@ -347,63 +481,55 @@ async function getFileContent(path) {
 =====================================
 
 Quick Start:
-  ls channels/                  # Browse all channels
-  cat channels/oskar/ABOUT.txt  # Read about a channel
+  ls channels/                     # Browse all channels
+  cat channels/oskar/ABOUT.txt     # Read about a channel
+  ls channels/oskar/tracks/        # View track metadata files
+  ls -lt channels/oskar/tracks/    # Sort by timestamp (oldest first)
+  ls channels/oskar/tags/          # View tracks organized by tags
+
+  # Files use track creation/update timestamps - sort by date naturally!
 
   # View favorites and downloads
-  ls favorites/                 # View favorite channels
-  ls downloads/                 # View channels marked for download
+  ls favorites/                    # View favorite channels
+  ls downloads/                    # View channels marked for download
 
 Configuration:
   All settings are stored in: ~/.config/r4fuse/
 
-  settings.json   # yt-dlp options, mount settings
+  settings.json   # All settings (see below)
   favorites.txt   # Favorite channels (one per line)
   downloads.txt   # Channels to auto-download (one per line)
 
-  Edit these files directly with any text editor!
-  Changes take effect on next mount.
+Settings.json options:
+  downloader: "yt-dlp" or "youtube-dl"
+  features.organizeByTags: true/false (organize downloads by tags)
+  features.rsyncEnabled: true/false (enable rsync sync)
+  paths.mountPoint: custom mount point path
+  paths.downloadDir: custom download directory path
 
-Advanced:
-  Use .ctrl/ files for programmatic control without config editing.
-  See .ctrl/HELP.txt for details.
+Tag Organization:
+  Both mounted and downloaded channels organize tracks as:
+    tracks/              # All track files
+    tags/<tagname>/      # Tracks grouped by tag (symlinks)
+
+  Tags are extracted from hashtags in track descriptions.
 
 See README.md in the project directory for complete documentation.
 `
   }
 
-  // Control HELP.txt
+  // Control HELP.txt (kept for backward compatibility but not documented)
   if (path === '/.ctrl/HELP.txt') {
-    return `Control Files - How to Use
-============================
+    return `r4fuse Control Files
+=====================
 
-Control files let you perform actions by writing to them.
-The filesystem itself is READ-ONLY for browsing.
+This directory is maintained for backward compatibility.
+Please use the configuration files instead:
+  ~/.config/r4fuse/settings.json
+  ~/.config/r4fuse/favorites.txt
+  ~/.config/r4fuse/downloads.txt
 
-Usage: echo "value" > control-file
-
-Available Commands:
-  echo "oskar" > download         # Download channel to ~/Music/radio4000/
-  echo "oskar" > favorite         # Add to favorites
-  echo "oskar" > unfavorite       # Remove from favorites
-  echo "oskar" > add-download     # Mark channel for auto-download
-  echo "oskar" > remove-download  # Remove from auto-download
-  echo "clear" > cache            # Clear API cache
-
-Examples:
-  # Download a channel immediately
-  echo "ko002" > .ctrl/download
-
-  # Add to auto-download list
-  echo "oskar" > .ctrl/add-download
-
-  # Then access via downloads/
-  ls ../downloads/oskar/
-
-Configuration stored in: ~/.config/r4fuse/
-  - favorites.txt
-  - downloads.txt
-  - settings.json
+See /HELP.txt in the root for more information.
 `
   }
 
@@ -493,36 +619,37 @@ Actions:
       return JSON.stringify(orderedTracks, null, 2)
     }
 
-    // Extract track number from filename (e.g., "001-song.txt" -> 0)
-    const match = parsed.file.match(/^(\d+)/)
-    if (match) {
-      const index = parseInt(match[1], 10) - 1
-      const track = orderedTracks[index]
+    // Match track by sanitized filename (no numeric prefix)
+    if (parsed.file.endsWith('.txt')) {
+      const filename = parsed.file.replace(/\.txt$/, '')
+      const track = orderedTracks.find(t => sanitizeFilename(t.title || 'untitled') === filename)
       if (track) {
-        // .txt file - rich metadata
-        if (parsed.file.endsWith('.txt')) {
-          const lines = [
-            `Title: ${track.title || 'Untitled'}`,
-            `URL: ${track.url}`,
-          ]
+        return formatTrackContent(track)
+      }
+    }
+  }
 
-          if (track.description) {
-            lines.push(`\nDescription:\n${track.description}`)
-          }
+  // Track files in tags: /channels/<slug>/tags/<tagname>/<file>
+  if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tags' && parsed.file && parsed.file2) {
+    const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
+      const { data, error} = await sdk.channels.readChannelTracks(parsed.channel)
+      if (error) throw new Error(error.message)
+      return data
+    })
 
-          if (track.discogs_url) {
-            lines.push(`\nDiscogs: ${track.discogs_url}`)
-          }
+    // Reverse tracks so oldest (first added) is #1
+    const orderedTracks = [...tracks].reverse()
 
-          if (track.created_at) {
-            lines.push(`\nAdded: ${new Date(track.created_at).toLocaleString()}`)
-          }
-
-          if (track.updated_at) {
-            lines.push(`Updated: ${new Date(track.updated_at).toLocaleString()}`)
-          }
-
-          return lines.join('\n') + '\n'
+    // Match track by sanitized filename (no numeric prefix)
+    if (parsed.file2.endsWith('.txt')) {
+      const filename = parsed.file2.replace(/\.txt$/, '')
+      const track = orderedTracks.find(t => sanitizeFilename(t.title || 'untitled') === filename)
+      if (track) {
+        // Verify this track has the tag
+        const tags = extractTagsFromTrack(track)
+        const trackTags = tags.length > 0 ? tags : ['untagged']
+        if (trackTags.includes(parsed.file)) {
+          return formatTrackContent(track)
         }
       }
     }
@@ -540,6 +667,64 @@ function sanitizeFilename(str) {
     .replace(/\s+/g, '-')
     .toLowerCase()
     .substring(0, 50)
+}
+
+/**
+ * Extract tags from track metadata
+ * Tags can come from description field (hashtags) or from structured metadata
+ */
+function extractTagsFromTrack(track) {
+  const tags = []
+
+  // Check description for hashtags
+  if (track.description) {
+    const hashtags = track.description.match(/#[\w]+/g)
+    if (hashtags) {
+      tags.push(...hashtags.map(tag => tag.substring(1).toLowerCase()))
+    }
+  }
+
+  // Check if track has a tags field (if supported by API)
+  if (track.tags && Array.isArray(track.tags)) {
+    tags.push(...track.tags.map(tag => tag.toLowerCase()))
+  }
+
+  // Remove duplicates
+  return [...new Set(tags)]
+}
+
+/**
+ * Format track content for .txt files
+ */
+function formatTrackContent(track) {
+  const lines = [
+    `Title: ${track.title || 'Untitled'}`,
+    `URL: ${track.url}`,
+  ]
+
+  if (track.description) {
+    lines.push(`\nDescription:\n${track.description}`)
+  }
+
+  if (track.discogs_url) {
+    lines.push(`\nDiscogs: ${track.discogs_url}`)
+  }
+
+  if (track.created_at) {
+    lines.push(`\nAdded: ${new Date(track.created_at).toLocaleString()}`)
+  }
+
+  if (track.updated_at) {
+    lines.push(`Updated: ${new Date(track.updated_at).toLocaleString()}`)
+  }
+
+  // Show tags if any
+  const tags = extractTagsFromTrack(track)
+  if (tags.length > 0) {
+    lines.push(`\nTags: ${tags.map(t => '#' + t).join(' ')}`)
+  }
+
+  return lines.join('\n') + '\n'
 }
 
 /**

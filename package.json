@@ -23,7 +23,8 @@
   "license": "GPL-3.0-or-later",
   "dependencies": {
     "@radio4000/sdk": "^0.4.11",
-    "fuse-native": "^2.2.6"
+    "fuse-native": "^2.2.6",
+    "node-id3": "^0.2.9"
   },
   "devDependencies": {
     "dotenv": "^16.4.5"

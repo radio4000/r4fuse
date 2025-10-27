@@ -1,7 +1,7 @@
 import Fuse from 'fuse-native'
 import { config, ensureDirectories, loadUserConfig } from './config.js'
 import * as fs from './filesystem.js'
-import { queueDownload } from './download.js'
+import { queueDownload, stopDownloads } from './download.js'
 import { loadDownloads } from './preferences.js'
 
 let fuse = null
@@ -93,9 +93,9 @@ export async function mount() {
     console.log(`✓ Mounted at ${config.mountPoint}`)
     console.log('\nUsage examples:')
     console.log(`  ls ${config.mountPoint}/channels/`)
-    console.log(`  cat ${config.mountPoint}/channels/tonitonirock/info.txt`)
+    console.log(`  cat ${config.mountPoint}/channels/tonitonirock/ABOUT.txt`)
+    console.log(`  ls ${config.mountPoint}/channels/tonitonirock/tags/`)
     console.log(`  mpv --playlist=${config.mountPoint}/channels/tonitonirock/tracks.m3u`)
-    console.log(`  echo "tonitonirock" > ${config.mountPoint}/.ctrl/download`)
     console.log('\nPress Ctrl+C to unmount\n')
 
     // Auto-download: download channels marked for auto-download
@@ -112,12 +112,23 @@ export async function mount() {
 
   // Handle shutdown
   process.once('SIGINT', async () => {
-    await unmount()
+    await shutdown()
   })
 
   process.once('SIGTERM', async () => {
-    await unmount()
+    await shutdown()
   })
+}
+
+/**
+ * Shutdown gracefully: stop downloads, then unmount
+ */
+async function shutdown() {
+  // Stop any running downloads
+  await stopDownloads()
+
+  // Unmount the filesystem
+  await unmount()
 }
 
 /**

@@ -22,14 +22,33 @@ export async function loadSettings() {
       audioQuality: '0',  // Highest quality VBR
       addMetadata: false,  // Don't embed thumbnails
     },
+    downloader: 'yt-dlp',  // Can be 'yt-dlp' or 'youtube-dl'
     mount: {
       debug: false,
+    },
+    paths: {
+      // Custom paths (leave empty to use defaults)
+      mountPoint: '',
+      downloadDir: '',
+    },
+    features: {
+      organizeByTags: true,  // Create symlinks organized by tags
+      rsyncEnabled: false,   // Enable rsync sync feature
     }
   }
 
   try {
     const data = await fs.readFile(settingsFile, 'utf-8')
-    return { ...defaultSettings, ...JSON.parse(data) }
+    const userSettings = JSON.parse(data)
+    // Deep merge settings
+    return {
+      ...defaultSettings,
+      ...userSettings,
+      ytdlp: { ...defaultSettings.ytdlp, ...userSettings.ytdlp },
+      mount: { ...defaultSettings.mount, ...userSettings.mount },
+      paths: { ...defaultSettings.paths, ...userSettings.paths },
+      features: { ...defaultSettings.features, ...userSettings.features }
+    }
   } catch (err) {
     if (err.code === 'ENOENT') {
       await fs.mkdir(getConfigDir(), { recursive: true })

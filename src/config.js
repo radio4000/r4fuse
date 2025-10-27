@@ -65,9 +65,31 @@ export async function ensureDirectories() {
  */
 export async function loadUserConfig() {
   try {
-    const data = await fs.readFile(config.configFile, 'utf-8')
-    const userConfig = JSON.parse(data)
-    Object.assign(config, userConfig)
+    // Try loading settings.json first (new format)
+    const settingsFile = path.join(path.dirname(config.configFile), 'settings.json')
+    try {
+      const data = await fs.readFile(settingsFile, 'utf-8')
+      const userConfig = JSON.parse(data)
+
+      // Apply custom paths if specified
+      if (userConfig.paths) {
+        if (userConfig.paths.mountPoint) {
+          config.mountPoint = userConfig.paths.mountPoint
+        }
+        if (userConfig.paths.downloadDir) {
+          config.downloadDir = userConfig.paths.downloadDir
+        }
+      }
+    } catch (settingsErr) {
+      // settings.json doesn't exist, try old config.json format
+      if (settingsErr.code === 'ENOENT') {
+        const data = await fs.readFile(config.configFile, 'utf-8')
+        const userConfig = JSON.parse(data)
+        Object.assign(config, userConfig)
+      } else {
+        throw settingsErr
+      }
+    }
   } catch (err) {
     // Config file doesn't exist, use defaults
     if (err.code !== 'ENOENT') {
