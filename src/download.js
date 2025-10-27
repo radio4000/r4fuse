@@ -79,29 +79,69 @@ async function downloadChannel(channelSlug) {
   const channelDir = path.join(config.downloadDir, channelSlug)
   await fs.mkdir(channelDir, { recursive: true })
 
+  // Load or create status tracking
+  const status = await loadStatus(channelDir)
+  const debugLog = path.join(channelDir, 'debug.txt')
+
+  // Log start of download session
+  await appendDebugLog(debugLog, `\n=== Download session started: ${new Date().toISOString()} ===`)
+  await appendDebugLog(debugLog, `Total tracks in channel: ${tracks.length}`)
+
   // Download each track
   let success = 0
   let failed = 0
+  let skipped = 0
 
   for (let i = 0; i < tracks.length; i++) {
     const track = tracks[i]
     const prefix = String(i + 1).padStart(3, '0')
+    const trackId = track.id || `${i}-${sanitizeFilename(track.title || 'untitled')}`
 
     console.log(`  [${i + 1}/${tracks.length}] ${track.title || 'Untitled'}`)
 
+    // Check if already downloaded successfully
+    if (status.downloaded.includes(trackId)) {
+      console.log(`    ⊙ Already downloaded, skipping`)
+      await appendDebugLog(debugLog, `[${i + 1}] SKIP: ${track.title} (already downloaded)`)
+      skipped++
+      continue
+    }
+
     try {
-      await downloadTrack(track, channelDir, prefix)
-      success++
+      const wasDownloaded = await downloadTrack(track, channelDir, prefix)
+      if (wasDownloaded) {
+        status.downloaded.push(trackId)
+        await appendDebugLog(debugLog, `[${i + 1}] OK: ${track.title}`)
+        success++
+      } else {
+        // File already exists (detected by yt-dlp)
+        status.downloaded.push(trackId)
+        await appendDebugLog(debugLog, `[${i + 1}] EXISTS: ${track.title}`)
+        skipped++
+      }
+
+      // Remove from failed list if it was there
+      status.failed = status.failed.filter(id => id !== trackId)
     } catch (err) {
       console.error(`    ✗ Failed: ${err.message}`)
+      status.failed.push(trackId)
+      await appendDebugLog(debugLog, `[${i + 1}] ERROR: ${track.title} - ${err.message}`)
       failed++
     }
+
+    // Save status after each track
+    await saveStatus(channelDir, status)
   }
 
   // Create local m3u playlist
   await createLocalPlaylist(channelSlug, channelDir, tracks)
 
+  // Final summary
+  await appendDebugLog(debugLog, `\nSession complete: ${success} downloaded, ${skipped} skipped, ${failed} failed`)
   console.log(`  ✓ Downloaded: ${success} tracks`)
+  if (skipped > 0) {
+    console.log(`  ⊙ Skipped: ${skipped} tracks (already downloaded)`)
+  }
   if (failed > 0) {
     console.log(`  ✗ Failed: ${failed} tracks`)
   }
@@ -155,11 +195,11 @@ async function downloadTrack(track, outputDir, prefix) {
 
     proc.on('close', (code) => {
       if (code === 0) {
-        resolve()
+        resolve(true) // Successfully downloaded
       } else {
         // Check if file already exists
         if (stderr.includes('has already been downloaded') || stdout.includes('has already been downloaded')) {
-          resolve()
+          resolve(false) // File exists, didn't download
         } else {
           // Include stderr in error message for debugging
           const errorMsg = stderr.trim() || stdout.trim() || `yt-dlp exited with code ${code}`
@@ -215,6 +255,46 @@ function sanitizeFilename(str) {
     .replace(/\s+/g, '-')
     .toLowerCase()
     .substring(0, 50)
+}
+
+/**
+ * Load status.json from channel directory
+ */
+async function loadStatus(channelDir) {
+  const statusFile = path.join(channelDir, 'status.json')
+
+  try {
+    const data = await fs.readFile(statusFile, 'utf-8')
+    return JSON.parse(data)
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      // File doesn't exist, return default status
+      return {
+        downloaded: [],
+        failed: [],
+        lastUpdated: new Date().toISOString()
+      }
+    }
+    throw err
+  }
+}
+
+/**
+ * Save status.json to channel directory
+ */
+async function saveStatus(channelDir, status) {
+  const statusFile = path.join(channelDir, 'status.json')
+  status.lastUpdated = new Date().toISOString()
+  await fs.writeFile(statusFile, JSON.stringify(status, null, 2))
+}
+
+/**
+ * Append a line to debug.txt
+ */
+async function appendDebugLog(debugFile, message) {
+  const timestamp = new Date().toISOString()
+  const line = `[${timestamp}] ${message}\n`
+  await fs.appendFile(debugFile, line)
 }
 
 /**
