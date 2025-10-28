@@ -124,11 +124,23 @@ async function downloadChannel(channelSlug) {
         // Write ID3 metadata to the downloaded file
         await writeTrackMetadata(downloadedFile, track, i + 1)
 
+        // Organize by tags immediately after download if enabled
+        const settings = await loadSettings()
+        if (settings.features && settings.features.organizeByTags) {
+          await organizeTrackByTags(track, tracksDir, channelDir, prefix)
+        }
+
         status.downloaded.push(trackId)
         await appendDebugLog(debugLog, `[${i + 1}] OK: ${track.title}`)
         success++
       } else {
         // File already exists (detected by downloader)
+        // Organize by tags immediately after download if enabled (for existing files)
+        const settings = await loadSettings()
+        if (settings.features && settings.features.organizeByTags) {
+          await organizeTrackByTags(track, tracksDir, channelDir, prefix)
+        }
+
         status.downloaded.push(trackId)
         await appendDebugLog(debugLog, `[${i + 1}] EXISTS: ${track.title}`)
         skipped++
@@ -149,12 +161,6 @@ async function downloadChannel(channelSlug) {
 
   // Create local m3u playlist
   await createLocalPlaylist(channelSlug, tracksDir, tracks)
-
-  // Organize by tags if enabled
-  const settings = await loadSettings()
-  if (settings.features && settings.features.organizeByTags) {
-    await organizeByTags(channelDir, tracksDir, tracks)
-  }
 
   // Final summary
   await appendDebugLog(debugLog, `\nSession complete: ${success} downloaded, ${skipped} skipped, ${failed} failed`)
@@ -423,7 +429,63 @@ async function appendDebugLog(debugFile, message) {
 }
 
 /**
- * Organize tracks by tags using symlinks
+ * Organize a single track by tags using symlinks
+ */
+async function organizeTrackByTags(track, tracksDir, channelDir, prefix) {
+  const sanitizedTitle = sanitizeFilename(track.title || 'untitled')
+
+  // Find the actual downloaded file
+  const files = await fs.readdir(tracksDir)
+  const trackFile = files.find(f => f.startsWith(`${prefix}-${sanitizedTitle}`))
+
+  if (!trackFile) {
+    console.log(`    Warning: Could not find downloaded file for ${track.title}`)
+    return
+  }
+
+  // Parse tags from track description or title
+  const tags = extractTags(track)
+
+  if (tags.length === 0) {
+    // If no tags, add to 'untagged' folder
+    tags.push('untagged')
+  }
+
+  // Create tags directory
+  const tagsDir = path.join(channelDir, 'tags')
+  await fs.mkdir(tagsDir, { recursive: true })
+
+  // Create symlinks for each tag
+  for (const tag of tags) {
+    const tagDir = path.join(tagsDir, sanitizeFilename(tag))
+    await fs.mkdir(tagDir, { recursive: true })
+
+    const sourcePath = path.join(tracksDir, trackFile)
+    const linkPath = path.join(tagDir, trackFile)
+
+    try {
+      // Remove existing symlink if it exists
+      try {
+        await fs.unlink(linkPath)
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err
+      }
+
+      // Create relative symlink
+      const relativePath = path.relative(tagDir, sourcePath)
+      await fs.symlink(relativePath, linkPath)
+    } catch (err) {
+      console.error(`    Warning: Could not create symlink for ${trackFile}: ${err.message}`)
+    }
+  }
+
+  if (tags.length > 0) {
+    console.log(`    ✓ Organized by tags: ${tags.join(', ')}`)
+  }
+}
+
+/**
+ * Organize all tracks by tags using symlinks (used for initial organization)
  */
 async function organizeByTags(channelDir, tracksDir, tracks) {
   console.log('  📂 Organizing tracks by tags...')
@@ -432,64 +494,17 @@ async function organizeByTags(channelDir, tracksDir, tracks) {
   const tagsDir = path.join(channelDir, 'tags')
   await fs.mkdir(tagsDir, { recursive: true })
 
-  // Collect all tags from tracks
-  const tagMap = new Map()
-
+  // Process each track
   for (let i = 0; i < tracks.length; i++) {
     const track = tracks[i]
     const prefix = String(i + 1).padStart(3, '0')
-    const sanitizedTitle = sanitizeFilename(track.title || 'untitled')
-
-    // Find the actual downloaded file
-    const files = await fs.readdir(tracksDir)
-    const trackFile = files.find(f => f.startsWith(`${prefix}-${sanitizedTitle}`))
-
-    if (!trackFile) continue
-
-    // Parse tags from track description or title
-    const tags = extractTags(track)
-
-    if (tags.length === 0) {
-      // If no tags, add to 'untagged' folder
-      tags.push('untagged')
-    }
-
-    // Create symlinks for each tag
-    for (const tag of tags) {
-      if (!tagMap.has(tag)) {
-        tagMap.set(tag, [])
-      }
-      tagMap.get(tag).push({ file: trackFile, track })
-    }
+    
+    await organizeTrackByTags(track, tracksDir, channelDir, prefix)
   }
 
-  // Create tag directories and symlinks
-  for (const [tag, trackFiles] of tagMap.entries()) {
-    const tagDir = path.join(tagsDir, sanitizeFilename(tag))
-    await fs.mkdir(tagDir, { recursive: true })
-
-    for (const { file } of trackFiles) {
-      const sourcePath = path.join(tracksDir, file)
-      const linkPath = path.join(tagDir, file)
-
-      try {
-        // Remove existing symlink if it exists
-        try {
-          await fs.unlink(linkPath)
-        } catch (err) {
-          if (err.code !== 'ENOENT') throw err
-        }
-
-        // Create relative symlink
-        const relativePath = path.relative(tagDir, sourcePath)
-        await fs.symlink(relativePath, linkPath)
-      } catch (err) {
-        console.error(`    Warning: Could not create symlink for ${file}: ${err.message}`)
-      }
-    }
-  }
-
-  console.log(`  ✓ Organized into ${tagMap.size} tag folders`)
+  // Count tag directories
+  const tagDirs = await fs.readdir(path.join(channelDir, 'tags'))
+  console.log(`  ✓ Organized into ${tagDirs.length} tag folders`)
 }
 
 /**
