@@ -3,6 +3,9 @@
 import { mount, unmount, status } from '../src/index.js'
 import { checkYtdlp } from '../src/download.js'
 
+// Import package info - this will be bundled into the executable
+import packageInfo from '../package.json' assert { type: 'json' }
+
 const command = process.argv[2]
 
 async function main() {
@@ -34,6 +37,13 @@ async function main() {
       process.exit(0)
       break
 
+    case 'version':
+    case '--version':
+    case '-v':
+      console.log(`r4fuse v${packageInfo.version}`)
+      process.exit(0)
+      break
+
     case 'help':
     case '--help':
     case '-h':
@@ -50,12 +60,14 @@ async function main() {
 
 function printHelp() {
   console.log(`
-r4fuse - FUSE filesystem for Radio4000
+r4fuse v${packageInfo.version} - FUSE filesystem for Radio4000
+Repository: ${getRepositoryUrl()}
 
 Usage:
   r4fuse mount          Mount the filesystem
   r4fuse unmount        Unmount the filesystem
   r4fuse status         Check if mounted
+  r4fuse version        Show version
   r4fuse help           Show this help
 
 Environment variables:
@@ -78,17 +90,28 @@ Examples:
   mpv --playlist=~/mnt/radio4000/channels/tonitonirock/tracks.m3u
 
   # Download a channel
-  echo "tonitonirock" > ~/mnt/radio4000/.ctrl/download
+  Add channel slug to ~/.config/r4fuse/downloads.txt to auto-download
 
   # Download multiple channels
-  for ch in tonitonirock 200ok oskar; do
-    echo "$ch" > ~/mnt/radio4000/.ctrl/download
-  done
-
-  # Clear cache
-  echo "clear" > ~/mnt/radio4000/.ctrl/cache
+  Add multiple channel slugs to ~/.config/r4fuse/downloads.txt
 `)
 }
+
+function getRepositoryUrl() {
+  if (packageInfo.repository) {
+    if (typeof packageInfo.repository === 'string') {
+      return packageInfo.repository
+    } else if (packageInfo.repository.url) {
+      return packageInfo.repository.url
+    }
+  }
+  return 'https://github.com/radio4000/r4fuse'
+}
+
+main().catch((err) => {
+  console.error('Error:', err.message)
+  process.exit(1)
+})
 
 main().catch((err) => {
   console.error('Error:', err.message)
