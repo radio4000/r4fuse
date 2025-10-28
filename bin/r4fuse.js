@@ -2,9 +2,13 @@
 
 import { mount, unmount, status } from '../src/index.js'
 import { checkYtdlp } from '../src/download.js'
+import fs from 'fs'
+import path from 'path'
 
-// Import package info - this will be bundled into the executable
-import packageInfo from '../package.json' assert { type: 'json' }
+// Get package info for version and repository info
+const packageInfo = JSON.parse(
+  fs.readFileSync(path.resolve(path.dirname('.'), 'package.json'), 'utf8')
+)
 
 const command = process.argv[2]
 
@@ -107,11 +111,6 @@ function getRepositoryUrl() {
   }
   return 'https://github.com/radio4000/r4fuse'
 }
-
-main().catch((err) => {
-  console.error('Error:', err.message)
-  process.exit(1)
-})
 
 main().catch((err) => {
   console.error('Error:', err.message)
