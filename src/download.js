@@ -124,6 +124,9 @@ async function downloadChannel(channelSlug) {
         // Write ID3 metadata to the downloaded file
         await writeTrackMetadata(downloadedFile, track, i + 1)
 
+        // Set file timestamps to match track creation/update times from Radio4000
+        await setFileTimestamps(downloadedFile, track)
+
         // Organize by tags immediately after download if enabled
         const settings = await loadSettings()
         if (settings.features && settings.features.organizeByTags) {
@@ -135,6 +138,9 @@ async function downloadChannel(channelSlug) {
         success++
       } else {
         // File already exists (detected by downloader)
+        // Set file timestamps to match track creation/update times from Radio4000 (for existing files)
+        await setFileTimestamps(downloadedFile, track)
+
         // Organize by tags immediately after download if enabled (for existing files)
         const settings = await loadSettings()
         if (settings.features && settings.features.organizeByTags) {
@@ -375,6 +381,24 @@ async function createLocalPlaylist(channelSlug, channelDir, tracks) {
 
   const playlistPath = path.join(channelDir, 'playlist.m3u')
   await fs.writeFile(playlistPath, m3u)
+}
+
+/**
+ * Set file timestamps to match track creation/update times from Radio4000
+ */
+async function setFileTimestamps(filePath, track) {
+  if (!filePath || !track) return
+
+  try {
+    // Use track's created_at as ctime and mtime, updated_at as atime
+    const createdTime = track.created_at ? new Date(track.created_at) : new Date()
+    const updatedTime = track.updated_at ? new Date(track.updated_at) : new Date()
+
+    // Set both access and modification times to match Radio4000 timestamps
+    await fs.utimes(filePath, updatedTime, createdTime)
+  } catch (err) {
+    console.error(`    Warning: Could not set timestamps for ${path.basename(filePath)}: ${err.message}`)
+  }
 }
 
 /**

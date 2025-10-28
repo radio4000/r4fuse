@@ -124,22 +124,141 @@ export async function getattr(path) {
 
   // /channels/<slug>
   if (parsed.root === 'channels' && parsed.channel && !parsed.subdir) {
-    return stat({ mode: 0o755, size: 0, isDir: true })
+    // Get channel info to use proper timestamps
+    const channel = await cachedCall(`channel:${parsed.channel}`, async () => {
+      const { data, error } = await sdk.channels.readChannel(parsed.channel)
+      if (error) throw new Error(error.message)
+      return data
+    })
+    
+    return stat({
+      mode: 0o755, 
+      size: 0, 
+      isDir: true,
+      mtime: channel.updated_at ? new Date(channel.updated_at) : undefined,
+      ctime: channel.created_at ? new Date(channel.created_at) : undefined,
+      atime: channel.updated_at ? new Date(channel.updated_at) : undefined,
+    })
   }
 
   // /channels/<slug>/tracks
   if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tracks' && !parsed.file) {
-    return stat({ mode: 0o755, size: 0, isDir: true })
+    // Get channel tracks to determine the directory timestamps (based on earliest track)
+    const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
+      const { data, error } = await sdk.channels.readChannelTracks(parsed.channel)
+      if (error) throw new Error(error.message)
+      return data
+    })
+
+    // Use the earliest track creation date or channel creation if no tracks
+    let dirCreated = null
+    let dirUpdated = null
+
+    if (tracks.length > 0) {
+      // Find earliest created track and latest updated track
+      const sortedByCreated = [...tracks].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      const sortedByUpdated = [...tracks].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+      
+      dirCreated = new Date(sortedByCreated[0].created_at)
+      dirUpdated = new Date(sortedByUpdated[0].updated_at)
+    } else {
+      // Fallback to channel timestamps if no tracks
+      const channel = await cachedCall(`channel:${parsed.channel}`, async () => {
+        const { data, error } = await sdk.channels.readChannel(parsed.channel)
+        if (error) throw new Error(error.message)
+        return data
+      })
+      dirCreated = channel.created_at ? new Date(channel.created_at) : undefined
+      dirUpdated = channel.updated_at ? new Date(channel.updated_at) : undefined
+    }
+
+    return stat({
+      mode: 0o755, 
+      size: 0, 
+      isDir: true,
+      mtime: dirUpdated,
+      ctime: dirCreated,
+      atime: dirUpdated,
+    })
   }
 
   // /channels/<slug>/tags
   if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tags' && !parsed.file) {
-    return stat({ mode: 0o755, size: 0, isDir: true })
+    // Get channel tracks to determine the directory timestamps (based on earliest track with tags)
+    const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
+      const { data, error } = await sdk.channels.readChannelTracks(parsed.channel)
+      if (error) throw new Error(error.message)
+      return data
+    })
+
+    // Use the earliest track creation date or channel creation if no tracks
+    let dirCreated = null
+    let dirUpdated = null
+
+    if (tracks.length > 0) {
+      // Find earliest created track and latest updated track
+      const sortedByCreated = [...tracks].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      const sortedByUpdated = [...tracks].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+      
+      dirCreated = new Date(sortedByCreated[0].created_at)
+      dirUpdated = new Date(sortedByUpdated[0].updated_at)
+    } else {
+      // Fallback to channel timestamps if no tracks
+      const channel = await cachedCall(`channel:${parsed.channel}`, async () => {
+        const { data, error } = await sdk.channels.readChannel(parsed.channel)
+        if (error) throw new Error(error.message)
+        return data
+      })
+      dirCreated = channel.created_at ? new Date(channel.created_at) : undefined
+      dirUpdated = channel.updated_at ? new Date(channel.updated_at) : undefined
+    }
+
+    return stat({
+      mode: 0o755, 
+      size: 0, 
+      isDir: true,
+      mtime: dirUpdated,
+      ctime: dirCreated,
+      atime: dirUpdated,
+    })
   }
 
   // /channels/<slug>/tags/<tagname>
   if (parsed.root === 'channels' && parsed.channel && parsed.subdir === 'tags' && parsed.file && !parsed.file2) {
-    return stat({ mode: 0o755, size: 0, isDir: true })
+    // Get the tag's earliest track creation date and latest updated date
+    const tracks = await cachedCall(`tracks:${parsed.channel}`, async () => {
+      const { data, error } = await sdk.channels.readChannelTracks(parsed.channel)
+      if (error) throw new Error(error.message)
+      return data
+    })
+
+    const tagName = parsed.file
+    const tagTracks = tracks.filter(track => {
+      const tags = extractTagsFromTrack(track)
+      const trackTags = tags.length > 0 ? tags : ['untagged']
+      return trackTags.includes(tagName)
+    })
+
+    let dirCreated = null
+    let dirUpdated = null
+
+    if (tagTracks.length > 0) {
+      // Find earliest created track and latest updated track for this tag
+      const sortedByCreated = [...tagTracks].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+      const sortedByUpdated = [...tagTracks].sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+      
+      dirCreated = new Date(sortedByCreated[0].created_at)
+      dirUpdated = new Date(sortedByUpdated[0].updated_at)
+    }
+
+    return stat({
+      mode: 0o755, 
+      size: 0, 
+      isDir: true,
+      mtime: dirUpdated,
+      ctime: dirCreated,
+      atime: dirUpdated,
+    })
   }
 
   // Files in channel root
@@ -147,10 +266,21 @@ export async function getattr(path) {
     const validFiles = ['ABOUT.txt', 'image.url', 'tracks.m3u']
     if (validFiles.includes(parsed.subdir)) {
       const content = await getFileContent(path)
+      
+      // Get channel info to use proper timestamps for these files
+      const channel = await cachedCall(`channel:${parsed.channel}`, async () => {
+        const { data, error } = await sdk.channels.readChannel(parsed.channel)
+        if (error) throw new Error(error.message)
+        return data
+      })
+      
       return stat({
         mode: 0o444,
         size: Buffer.byteLength(content),
         isDir: false,
+        mtime: channel.updated_at ? new Date(channel.updated_at) : undefined,
+        ctime: channel.created_at ? new Date(channel.created_at) : undefined,
+        atime: channel.updated_at ? new Date(channel.updated_at) : undefined,
       })
     }
   }
