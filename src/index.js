@@ -2,7 +2,7 @@ import Fuse from 'fuse-native'
 import { config, ensureDirectories, loadUserConfig } from './config.js'
 import * as fs from './filesystem.js'
 import { queueDownload, stopDownloads } from './download.js'
-import { loadDownloads } from './preferences.js'
+import { loadDownloads } from './config.js'
 
 let fuse = null
 

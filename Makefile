@@ -16,18 +16,18 @@ help: ## Show this help message
 	@echo "  Download dir: $(DOWNLOAD_DIR)"
 	@echo ""
 	@echo "Configuration:"
-	@echo "  Location:  ~/.config/r4fuse/"
+	@echo "  Location:  ~/.config/radio4000/r4fuse/"
 	@echo "  Files:"
 	@echo "    settings.json   - All settings (downloader, paths, features)"
 	@echo "    favorites.txt   - Favorite channels (one slug per line)"
 	@echo "    downloads.txt   - Auto-download channels (one slug per line)"
 	@echo ""
 	@echo "Managing Channels:"
-	@echo "  Favorites:  Edit ~/.config/r4fuse/favorites.txt"
+	@echo "  Favorites:  Edit ~/.config/radio4000/r4fuse/favorites.txt"
 	@echo "              Add one channel slug per line (e.g., 'oskar')"
 	@echo "              Access via: $(MOUNT_POINT)/favorites/"
 	@echo ""
-	@echo "  Downloads:  Edit ~/.config/r4fuse/downloads.txt"
+	@echo "  Downloads:  Edit ~/.config/radio4000/r4fuse/downloads.txt"
 	@echo "              Channels listed here will auto-download on mount"
 	@echo "              Files saved to: $(DOWNLOAD_DIR)/"
 	@echo ""
@@ -124,12 +124,12 @@ status: ## Show filesystem status
 		echo "Status: Not mounted"; \
 	fi
 	@echo ""
-	@echo "Preferences:"
-	@if [ -f ~/.config/r4fuse/preferences.json ]; then \
-		echo "  Favorites: $$(cat ~/.config/r4fuse/preferences.json | grep -o '"favorites":\[[^]]*\]' | grep -o '"[^"]*"' | wc -l)"; \
-		echo "  Auto-sync: $$(cat ~/.config/r4fuse/preferences.json | grep -o '"autoSync":\[[^]]*\]' | grep -o '"[^"]*"' | wc -l)"; \
+	@echo "Settings:"
+	@if [ -f ~/.config/radio4000/r4fuse/settings.json ]; then \
+		echo "  Favorites: $$(cat ~/.config/radio4000/r4fuse/settings.json | grep -o '"favorites":\[[^]]*\]' | grep -o '"[^"]*"' | wc -l)"; \
+		echo "  Auto-sync: $$(cat ~/.config/radio4000/r4fuse/settings.json | grep -o '"autoSync":\[[^]]*\]' | grep -o '"[^"]*"' | wc -l)"; \
 	else \
-		echo "  No preferences file"; \
+		echo "  No settings file"; \
 	fi
 	@echo ""
 	@echo "Downloads:"

@@ -2,7 +2,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { spawn } from 'child_process'
 import { config } from './config.js'
-import { loadSettings } from './preferences.js'
+import { loadSettings } from './config.js'
 import { createSdk } from '@radio4000/sdk'
 import { createClient } from '@supabase/supabase-js'
 import NodeID3 from 'node-id3'
@@ -405,6 +405,7 @@ async function setFileTimestamps(filePath, track) {
  * Sanitize filename
  */
 function sanitizeFilename(str) {
+	// hello anyone? can you see what I type?
   return str
     .replace(/[^a-z0-9-_\s]/gi, '')
     .replace(/\s+/g, '-')
@@ -522,7 +523,7 @@ async function organizeByTags(channelDir, tracksDir, tracks) {
   for (let i = 0; i < tracks.length; i++) {
     const track = tracks[i]
     const prefix = String(i + 1).padStart(3, '0')
-    
+
     await organizeTrackByTags(track, tracksDir, channelDir, prefix)
   }
 
@@ -628,13 +629,13 @@ export async function stopDownloads() {
   // Kill current download process if running
   if (currentDownloadProcess) {
     console.log('  Attempting to stop active download...')
-    
+
     try {
       // Get the process ID before attempting to kill
       const pid = currentDownloadProcess.pid;
-      
+
       console.log(`  Killing process tree for PID: ${pid}`)
-      
+
       // On Unix-like systems, kill the entire process group by using negative PID
       if (process.platform !== 'win32') {
         try {
@@ -654,10 +655,10 @@ export async function stopDownloads() {
         // On Windows, try to kill the individual process
         currentDownloadProcess.kill('SIGTERM');
       }
-      
+
       // Wait a bit to allow graceful shutdown
       await new Promise(resolve => setTimeout(resolve, 500))
-      
+
       // If process still exists, send SIGKILL
       if (currentDownloadProcess && !currentDownloadProcess.killed) {
         if (process.platform !== 'win32') {
@@ -681,7 +682,7 @@ export async function stopDownloads() {
     } catch (err) {
       console.log(`  Error stopping process: ${err.message}`)
     }
-    
+
     // Always clear the reference
     currentDownloadProcess = null
   } else {

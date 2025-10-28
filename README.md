@@ -99,7 +99,7 @@ This ensures no partial downloads are left and the filesystem is properly unmoun
 
 ## Configuration
 
-All configuration is stored in `~/.config/r4fuse/settings.json`. The file is automatically created with default values on first run.
+All configuration is stored in `~/.config/radio4000/r4fuse/settings.json`. The file is automatically created with default values on first run.
 
 ### Settings.json Options
 

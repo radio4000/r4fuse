@@ -12,7 +12,7 @@ import {
   removeFavorite,
   addDownload,
   removeDownload,
-} from './preferences.js'
+} from './config.js'
 
 // File type constants (from stat.h)
 const S_IFDIR = 0o040000 // directory
@@ -624,7 +624,7 @@ Quick Start:
   ls downloads/                    # View channels marked for download
 
 Configuration:
-  All settings are stored in: ~/.config/r4fuse/
+  All settings are stored in: ~/.config/radio4000/r4fuse/
 
   settings.json   # All settings (see below)
   favorites.txt   # Favorite channels (one per line)
@@ -655,9 +655,9 @@ See README.md in the project directory for complete documentation.
 
 This directory is maintained for backward compatibility.
 Please use the configuration files instead:
-  ~/.config/r4fuse/settings.json
-  ~/.config/r4fuse/favorites.txt
-  ~/.config/r4fuse/downloads.txt
+  ~/.config/radio4000/r4fuse/settings.json
+  ~/.config/radio4000/r4fuse/favorites.txt
+  ~/.config/radio4000/r4fuse/downloads.txt
 
 See /HELP.txt in the root for more information.
 `

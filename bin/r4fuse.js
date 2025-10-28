@@ -94,10 +94,10 @@ Examples:
   mpv --playlist=~/mnt/radio4000/channels/tonitonirock/tracks.m3u
 
   # Download a channel
-  Add channel slug to ~/.config/r4fuse/downloads.txt to auto-download
+  Add channel slug to ~/.config/radio4000/r4fuse/downloads.txt to auto-download
 
   # Download multiple channels
-  Add multiple channel slugs to ~/.config/r4fuse/downloads.txt
+  Add multiple channel slugs to ~/.config/radio4000/r4fuse/downloads.txt
 `)
 }
 
