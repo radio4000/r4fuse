@@ -44,7 +44,7 @@ jobs:
 
     - name: Build executable with Bun
       run: |
-        npm run build-${{ matrix.platform_id }}
+        npm run build:${{ matrix.platform_id }}
       env:
         NODE_ENV: production
 
@@ -78,7 +78,7 @@ jobs:
 
     - name: Build executable for macOS ARM64
       run: |
-        npm run build-osx-arm64
+        npm run build:osx-arm64
       env:
         NODE_ENV: production
 
