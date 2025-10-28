@@ -20,7 +20,9 @@ export async function loadSettings() {
       format: 'bestaudio/best',
       audioFormat: 'mp3',
       audioQuality: '0',  // Highest quality VBR
-      addMetadata: false,  // Don't embed thumbnails
+      addMetadata: false,  // Don't add metadata via yt-dlp (we handle it ourselves)
+      embedThumbnail: true,  // Embed thumbnail as cover art
+      writeThumbnail: false, // Don't write separate thumbnail files (optional)
     },
     downloader: 'yt-dlp',  // Can be 'yt-dlp' or 'youtube-dl'
     mount: {

@@ -192,11 +192,25 @@ async function downloadTrack(track, outputDir, prefix) {
       '--newline',  // Progress on separate lines
     ]
 
+    // Add thumbnail embedding if enabled in settings
+    if (settings.ytdlp.embedThumbnail) {
+      args.push('--embed-thumbnail')
+    }
+
+    // Optionally write thumbnail as separate file if also wanted
+    if (settings.ytdlp.writeThumbnail) {
+      args.push('--write-thumbnail')
+    }
+
     // Note: We don't add metadata with downloader as we'll add it ourselves with node-id3
 
     args.push(track.url)
 
-    const proc = spawn(downloader, args)
+    // Spawn the process - we'll track it and kill all children if needed
+    // Spawn with stdio to properly track and kill process tree
+    const proc = spawn(downloader, args, {
+      stdio: ['ignore', 'pipe', 'pipe'] // stdin: ignore, stdout: pipe, stderr: pipe
+    })
 
     // Track the current process for cleanup
     currentDownloadProcess = proc
@@ -235,8 +249,8 @@ async function downloadTrack(track, outputDir, prefix) {
     })
 
     proc.on('close', async (code) => {
-      // Clear current process tracker
-      if (currentDownloadProcess === proc) {
+      // Clear current process tracker if this is the current process
+      if (currentDownloadProcess && currentDownloadProcess === proc) {
         currentDownloadProcess = null
       }
 
@@ -269,6 +283,11 @@ async function downloadTrack(track, outputDir, prefix) {
     })
 
     proc.on('error', (err) => {
+      // Clear current process tracker on error
+      if (currentDownloadProcess && currentDownloadProcess === proc) {
+        currentDownloadProcess = null
+      }
+
       if (err.code === 'ENOENT') {
         reject(new Error(`${downloader} not found. Please install it.`))
       } else {
@@ -569,13 +588,65 @@ export async function stopDownloads() {
 
   // Kill current download process if running
   if (currentDownloadProcess) {
+    console.log('  Attempting to stop active download...')
+    
     try {
-      currentDownloadProcess.kill('SIGTERM')
-      console.log('  Stopped active download')
+      // Get the process ID before attempting to kill
+      const pid = currentDownloadProcess.pid;
+      
+      console.log(`  Killing process tree for PID: ${pid}`)
+      
+      // On Unix-like systems, kill the entire process group by using negative PID
+      if (process.platform !== 'win32') {
+        try {
+          // Kill the entire process group with SIGTERM first
+          process.kill(-pid, 'SIGTERM');
+          console.log(`  Sent SIGTERM to process group: ${-pid}`)
+        } catch (groupKillErr) {
+          // If process group kill fails, fall back to individual process kill
+          console.log(`  Process group kill failed: ${groupKillErr.message}`)
+          try {
+            currentDownloadProcess.kill('SIGTERM');
+          } catch (individualKillErr) {
+            console.log(`  Individual process kill also failed: ${individualKillErr.message}`)
+          }
+        }
+      } else {
+        // On Windows, try to kill the individual process
+        currentDownloadProcess.kill('SIGTERM');
+      }
+      
+      // Wait a bit to allow graceful shutdown
+      await new Promise(resolve => setTimeout(resolve, 500))
+      
+      // If process still exists, send SIGKILL
+      if (currentDownloadProcess && !currentDownloadProcess.killed) {
+        if (process.platform !== 'win32') {
+          try {
+            // Kill the process group with SIGKILL
+            process.kill(-pid, 'SIGKILL');
+            console.log(`  Sent SIGKILL to process group: ${-pid}`)
+          } catch (groupKillErr) {
+            console.log(`  Process group SIGKILL failed: ${groupKillErr.message}`)
+            try {
+              currentDownloadProcess.kill('SIGKILL');
+            } catch (individualKillErr) {
+              console.log(`  Individual process SIGKILL also failed: ${individualKillErr.message}`)
+            }
+          }
+        } else {
+          // On Windows, send SIGKILL to individual process
+          currentDownloadProcess.kill('SIGKILL');
+        }
+      }
     } catch (err) {
-      // Process might have already ended
+      console.log(`  Error stopping process: ${err.message}`)
     }
+    
+    // Always clear the reference
     currentDownloadProcess = null
+  } else {
+    console.log('  No active download process to stop')
   }
 
   // Wait a bit for processes to clean up

@@ -124,11 +124,18 @@ export async function mount() {
  * Shutdown gracefully: stop downloads, then unmount
  */
 async function shutdown() {
+  console.log('\n🛑 Received shutdown signal, stopping downloads...');
+  
   // Stop any running downloads
   await stopDownloads()
 
+  console.log('✅ Downloads stopped, now unmounting...');
+  
   // Unmount the filesystem
   await unmount()
+  
+  // Exit the process after unmounting
+  process.exit(0)
 }
 
 /**

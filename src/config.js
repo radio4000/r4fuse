@@ -40,6 +40,8 @@ export const config = {
     audioFormat: 'mp3',
     audioQuality: '0',  // 0 = best quality (VBR ~245 kbps for mp3)
     addMetadata: true,
+    embedThumbnail: true,  // Embed thumbnail as cover art
+    writeThumbnail: false, // Don't write separate thumbnail files (optional)
   }
 }
 

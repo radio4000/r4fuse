@@ -131,6 +131,14 @@ All configuration is stored in `~/.config/r4fuse/settings.json`. The file is aut
 #### Downloader
 - `downloader`: Choose between `"yt-dlp"` (default) or `"youtube-dl"`
 
+#### yt-dlp Settings
+- `ytdlp.format`: Video/audio format selection (default: `"bestaudio/best"`)
+- `ytdlp.audioFormat`: Output audio format (default: `"mp3"`)
+- `ytdlp.audioQuality`: Audio quality (default: `"0"` for highest quality VBR)
+- `ytdlp.addMetadata`: Whether to add metadata via yt-dlp (default: `false`, we handle it ourselves)
+- `ytdlp.embedThumbnail`: Embed thumbnail as cover art in audio files (default: `true`)
+- `ytdlp.writeThumbnail`: Also save thumbnail as separate file (default: `false`)
+
 #### Custom Paths
 - `paths.mountPoint`: Custom mount point (leave empty for default: `~/mnt/radio4000`)
 - `paths.downloadDir`: Custom download directory (leave empty for default: `~/Music/radio4000`)
