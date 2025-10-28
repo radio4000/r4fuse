@@ -12,10 +12,10 @@
     "dev": "node --watch bin/r4fuse.js mount",
     "test": "node test/test.js",
     "build": "bun build bin/r4fuse.js --compile --outfile=r4fuse",
-    "build-linux": "bun build bin/r4fuse.js --compile --outfile=r4fuse-linux --target=linux-x64",
-    "build-windows": "bun build bin/r4fuse.js --compile --outfile=r4fuse-windows.exe --target=windows-x64",
-    "build-osx": "bun build bin/r4fuse.js --compile --outfile=r4fuse-osx --target=darwin-x64",
-    "build-osx-arm64": "bun build bin/r4fuse.js --compile --outfile=r4fuse-macos-arm64 --target=darwin-arm64",
+    "build-linux": "bun build bin/r4fuse.js --compile --outfile=r4fuse-linux",
+    "build-windows": "bun build bin/r4fuse.js --compile --outfile=r4fuse-windows.exe",
+    "build-osx": "bun build bin/r4fuse.js --compile --outfile=r4fuse-osx",
+    "build-osx-arm64": "bun build bin/r4fuse.js --compile --outfile=r4fuse-macos-arm64",
     "build:all": "echo 'Use GitHub Actions workflow to build all platforms'"
   },
   "keywords": [
