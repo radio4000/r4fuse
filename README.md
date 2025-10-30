@@ -138,6 +138,8 @@ All configuration is stored in `~/.config/radio4000/r4fuse/settings.json`. The f
 - `ytdlp.addMetadata`: Whether to add metadata via yt-dlp (default: `false`, we handle it ourselves)
 - `ytdlp.embedThumbnail`: Embed thumbnail as cover art in audio files (default: `true`)
 - `ytdlp.writeThumbnail`: Also save thumbnail as separate file (default: `false`)
+- `ytdlp.cookiesFile`: Path to cookies file for authentication (default: `""`, disabled)
+- `ytdlp.cookiesFromBrowser`: Browser to extract cookies from (default: `""`, disabled) - takes precedence over cookiesFile
 
 #### Custom Paths
 - `paths.mountPoint`: Custom mount point (leave empty for default: `~/mnt/radio4000`)
@@ -148,6 +150,35 @@ All configuration is stored in `~/.config/radio4000/r4fuse/settings.json`. The f
   - Creates a `tags/` directory with symlinks organized by hashtags found in track descriptions
   - Tracks without tags go into `tags/untagged/`
 - `features.rsyncEnabled`: Enable rsync sync functionality (default: `false`)
+
+## Handling YouTube Authentication Issues
+
+If you encounter errors with YouTube downloads like:
+```
+ERROR: [youtube] I5ffduE8DvE: Sign in to confirm you're not a bot...
+```
+
+You need to configure cookie authentication. You can do this in two ways:
+
+1. **Using cookies from browser:**
+   ```json
+   {
+     "ytdlp": {
+       "cookiesFromBrowser": "chrome"  // or "firefox", "safari", "edge"
+     }
+   }
+   ```
+
+2. **Using a cookies file:**
+   ```json
+   {
+     "ytdlp": {
+       "cookiesFile": "/path/to/your/cookies.txt"
+     }
+   }
+   ```
+
+For detailed instructions on setting up cookies, see the [COOKIES.md](COOKIES.md) file in the repository.
 
 ## Track Organization
 

@@ -1,707 +1,962 @@
-import fs from 'fs/promises'
-import path from 'path'
-import { spawn } from 'child_process'
-import { config } from './config.js'
-import { loadSettings } from './config.js'
-import { createSdk } from '@radio4000/sdk'
-import { createClient } from '@supabase/supabase-js'
-import NodeID3 from 'node-id3'
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { createSdk } from "@radio4000/sdk";
+import { createClient } from "@supabase/supabase-js";
+import getArtistTitle from "get-artist-title";
+import NodeID3 from "node-id3";
+import { config, loadSettings } from "./config.js";
+import { sanitizeFilename } from "./utils/path-utils.js";
+import { extractTags } from "./utils/track-utils.js";
 
-const queue = []
-let isProcessing = false
-let isShuttingDown = false
-let currentDownloadProcess = null
+/**
+ * Extract YouTube ID from various YouTube URL formats
+ */
+function extractYouTubeId(url) {
+  if (!url) return null;
+
+  // Regular expressions for different YouTube URL formats
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
+    /(?:youtube\.com\/v\/|youtube\.com\/watch\?.*vi?=)([a-zA-Z0-9_-]{11})/,
+    /(?:youtube\.com\/watch\?.*v=)([a-zA-Z0-9_-]{11})/
+  ];
+
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+}
+
+const queue = [];
+let isProcessing = false;
+let isShuttingDown = false;
+let currentDownloadProcess = null;
 
 // Initialize SDK
-let sdk = null
+let sdk = null;
 
 function initSDK() {
-  if (!sdk) {
-    const supabase = createClient(config.supabase.url, config.supabase.key)
-    sdk = createSdk(supabase)
-  }
+	if (!sdk) {
+		const supabase = createClient(config.supabase.url, config.supabase.key);
+		sdk = createSdk(supabase);
+	}
 }
 
 /**
  * Queue a channel for download
  */
 export async function queueDownload(channelSlug) {
-  if (!queue.includes(channelSlug)) {
-    queue.push(channelSlug)
-    console.log(`📥 Added to queue: ${channelSlug}`)
-  }
+	if (!queue.includes(channelSlug)) {
+		queue.push(channelSlug);
+		console.log(`📥 Added to queue: ${channelSlug}`);
+	}
 
-  if (!isProcessing) {
-    processQueue()
-  }
+	if (!isProcessing) {
+		processQueue();
+	}
 }
 
 /**
  * Process download queue
  */
 async function processQueue() {
-  if (isShuttingDown || queue.length === 0) {
-    isProcessing = false
-    return
-  }
+	if (isShuttingDown || queue.length === 0) {
+		isProcessing = false;
+		return;
+	}
 
-  isProcessing = true
-  const channelSlug = queue.shift()
+	isProcessing = true;
+	const channelSlug = queue.shift();
 
-  console.log(`\n🎵 Starting download: ${channelSlug}`)
+	console.log(`\n🎵 Starting download: ${channelSlug}`);
 
-  try {
-    await downloadChannel(channelSlug)
-    console.log(`✓ Completed: ${channelSlug}`)
-  } catch (err) {
-    if (!isShuttingDown) {
-      console.error(`✗ Failed to download ${channelSlug}:`, err.message)
-    }
-  }
+	try {
+		await downloadChannel(channelSlug);
+		console.log(`✓ Completed: ${channelSlug}`);
+	} catch (err) {
+		if (!isShuttingDown) {
+			console.error(`✗ Failed to download ${channelSlug}:`, err.message);
+		}
+	}
 
-  // Process next in queue
-  if (!isShuttingDown) {
-    setTimeout(() => processQueue(), 1000)
-  }
+	// Process next in queue
+	if (!isShuttingDown) {
+		setTimeout(() => processQueue(), 1000);
+	}
 }
 
 /**
  * Download all tracks from a channel
  */
 async function downloadChannel(channelSlug) {
-  initSDK()
+	initSDK();
 
-  // Fetch channel tracks
-  const { data: tracks, error } = await sdk.channels.readChannelTracks(channelSlug)
-  if (error) throw new Error(error.message)
+	// Fetch channel tracks
+	let tracks, error;
+	try {
+		const response = await sdk.channels.readChannelTracks(channelSlug);
+		tracks = response.data;
+		error = response.error;
+	} catch (e) {
+		console.error(`SDK Error fetching tracks for ${channelSlug}:`, e.message);
+		throw new Error(`Failed to fetch tracks: ${e.message}`);
+	}
+	if (error) throw new Error(error.message);
 
-  if (!tracks || tracks.length === 0) {
-    console.log(`  No tracks found for ${channelSlug}`)
-    return
-  }
+	if (!tracks) {
+		console.log(`  No tracks returned for ${channelSlug}`);
+		return;
+	}
 
-  console.log(`  Found ${tracks.length} tracks`)
+	if (!tracks || tracks.length === 0) {
+		console.log(`  No tracks found for ${channelSlug}`);
+		return;
+	}
 
-  // Create channel directory
-  const channelDir = path.join(config.downloadDir, channelSlug)
-  await fs.mkdir(channelDir, { recursive: true })
+	console.log(`  Found ${tracks.length} tracks`);
 
-  // Create tracks subdirectory (for organizing files)
-  const tracksDir = path.join(channelDir, 'tracks')
-  await fs.mkdir(tracksDir, { recursive: true })
+	// Create channel directory
+	const channelDir = path.join(config.downloadDir, channelSlug);
+	await fs.mkdir(channelDir, { recursive: true });
 
-  // Load or create status tracking
-  const status = await loadStatus(channelDir)
-  const debugLog = path.join(channelDir, 'debug.txt')
+	// Create tracks subdirectory (for organizing files)
+	const tracksDir = path.join(channelDir, "tracks");
+	await fs.mkdir(tracksDir, { recursive: true });
 
-  // Log start of download session
-  await appendDebugLog(debugLog, `\n=== Download session started: ${new Date().toISOString()} ===`)
-  await appendDebugLog(debugLog, `Total tracks in channel: ${tracks.length}`)
+	// Load or create status tracking
+	let status = await loadStatus(channelDir);
 
-  // Download each track
-  let success = 0
-  let failed = 0
-  let skipped = 0
+	// If status is empty (new channel) or potentially corrupted, rebuild from existing files
+	if (status.downloaded.length === 0) {
+		const rebuiltStatus = await rebuildStatusFromFiles(channelDir, tracks);
+		// Only use rebuilt status if it found some existing files
+		if (rebuiltStatus.downloaded.length > 0) {
+			status = rebuiltStatus;
+			console.log(
+				`  ♻️ Rebuilt status from ${rebuiltStatus.downloaded.length} existing files`,
+			);
+		}
+	}
 
-  for (let i = 0; i < tracks.length; i++) {
-    const track = tracks[i]
-    const prefix = String(i + 1).padStart(3, '0')
-    const trackId = track.id || `${i}-${sanitizeFilename(track.title || 'untitled')}`
+	// Get list of existing files to avoid re-downloading
+	const existingFiles = new Set();
+	try {
+		const files = await fs.readdir(tracksDir);
+		files.forEach((file) => {
+			existingFiles.add(file);
+		});
+	} catch (_err) {
+		// If directory doesn't exist or can't be read, continue with empty set
+	}
 
-    console.log(`  [${i + 1}/${tracks.length}] ${track.title || 'Untitled'}`)
+	const debugLog = path.join(channelDir, "debug.txt");  // This can be removed later
 
-    // Check if already downloaded successfully
-    if (status.downloaded.includes(trackId)) {
-      console.log(`    ⊙ Already downloaded, skipping`)
-      await appendDebugLog(debugLog, `[${i + 1}] SKIP: ${track.title} (already downloaded)`)
-      skipped++
-      continue
-    }
+	// Log start of download session
+	await appendDebugLog(
+		`\n=== Download session started: ${new Date().toISOString()} ===`,
+	);
+	await appendDebugLog(`Total tracks in channel: ${tracks.length}`);
+	await appendDebugLog(`Existing files: ${existingFiles.size}`);
 
-    try {
-      const downloadedFile = await downloadTrack(track, tracksDir, prefix)
-      if (downloadedFile) {
-        // Write ID3 metadata to the downloaded file
-        await writeTrackMetadata(downloadedFile, track, i + 1)
+	// Download each track
+	let success = 0;
+	let failed = 0;
+	let skipped = 0;
 
-        // Set file timestamps to match track creation/update times from Radio4000
-        await setFileTimestamps(downloadedFile, track)
+	for (let i = 0; i < tracks.length; i++) {
+		const track = tracks[i];
+		const trackIdentifier = track.id || sanitizeFilename(track.title || "untitled");
+		const _expectedFileName = `${sanitizeFilename(track.title || "untitled")}`;
 
-        // Organize by tags immediately after download if enabled
-        const settings = await loadSettings()
-        if (settings.features && settings.features.organizeByTags) {
-          await organizeTrackByTags(track, tracksDir, channelDir, prefix)
-        }
+		console.log(`  [${i + 1}/${tracks.length}] ${track.title || "Untitled"}`);
 
-        status.downloaded.push(trackId)
-        await appendDebugLog(debugLog, `[${i + 1}] OK: ${track.title}`)
-        success++
-      } else {
-        // File already exists (detected by downloader)
-        // Set file timestamps to match track creation/update times from Radio4000 (for existing files)
-        await setFileTimestamps(downloadedFile, track)
+		// Check if already downloaded by checking for files with this name or track ID
+		const expectedSanitizedTitle = sanitizeFilename(track.title || "untitled");
+		const youtubeId = extractYouTubeId(track.url);
+		let fileExists = Array.from(existingFiles).some((file) =>
+			file.startsWith(`${expectedSanitizedTitle}`),
+		);
 
-        // Organize by tags immediately after download if enabled (for existing files)
-        const settings = await loadSettings()
-        if (settings.features && settings.features.organizeByTags) {
-          await organizeTrackByTags(track, tracksDir, channelDir, prefix)
-        }
+		// Also check for files with the track ID in brackets
+		if (track.id && !fileExists) {
+			fileExists = Array.from(existingFiles).some((file) =>
+				file.includes(`[${track.id}]`),
+			);
+		}
+		
+		// Also check for files with the YouTube ID in brackets
+		if (youtubeId && !fileExists) {
+			fileExists = Array.from(existingFiles).some((file) =>
+				file.includes(`[${youtubeId}]`),
+			);
+		}
 
-        status.downloaded.push(trackId)
-        await appendDebugLog(debugLog, `[${i + 1}] EXISTS: ${track.title}`)
-        skipped++
-      }
+		// Also check if it's marked in status
+		const trackIdForStatus = track.id || `${i}-${sanitizeFilename(track.title || 'untitled')}`;
+		const statusMarked = status.downloaded.includes(trackIdForStatus);
 
-      // Remove from failed list if it was there
-      status.failed = status.failed.filter(id => id !== trackId)
-    } catch (err) {
-      console.error(`    ✗ Failed: ${err.message}`)
-      status.failed.push(trackId)
-      await appendDebugLog(debugLog, `[${i + 1}] ERROR: ${track.title} - ${err.message}`)
-      failed++
-    }
+		if (fileExists || statusMarked) {
+			console.log(`    ⊙ Already downloaded, skipping`);
+			await appendDebugLog(
+				`[${i + 1}] SKIP: ${track.title} (already exists or marked in status)`,
+			);
+			skipped++;
+			continue;
+		}
 
-    // Save status after each track
-    await saveStatus(channelDir, status)
-  }
+		try {
+			const downloadedFile = await downloadTrack(track, tracksDir);
 
-  // Create local m3u playlist
-  await createLocalPlaylist(channelSlug, tracksDir, tracks)
+			// Verify that the file actually exists before marking as downloaded
+			let fileActuallyExists = false;
+			if (downloadedFile) {
+				try {
+					await fs.access(downloadedFile);
+					fileActuallyExists = true;
+				} catch (_err) {
+					// File doesn't exist, wait a bit and try again (race condition)
+					await new Promise((resolve) => setTimeout(resolve, 200));
+					try {
+						await fs.access(downloadedFile);
+						fileActuallyExists = true;
+					} catch (_retryErr) {
+						console.log(
+							`    Warning: Could not verify file exists: ${path.basename(downloadedFile)}`,
+						);
+						fileActuallyExists = false;
+					}
+				}
+			}
 
-  // Final summary
-  await appendDebugLog(debugLog, `\nSession complete: ${success} downloaded, ${skipped} skipped, ${failed} failed`)
-  console.log(`  ✓ Downloaded: ${success} tracks`)
-  if (skipped > 0) {
-    console.log(`  ⊙ Skipped: ${skipped} tracks (already downloaded)`)
-  }
-  if (failed > 0) {
-    console.log(`  ✗ Failed: ${failed} tracks`)
-  }
+			if (fileActuallyExists) {
+				// Write ID3 metadata to the downloaded file
+				await writeTrackMetadata(downloadedFile, track, i + 1);
+
+				// Set file timestamps to match track creation/update times from Radio4000
+				await setFileTimestamps(downloadedFile, track);
+
+				// Organize by tags immediately after download if enabled
+				const settings = await loadSettings();
+				if (settings.features?.organizeByTags) {
+					await organizeTrackByTags(track, tracksDir, channelDir);
+				}
+
+				status.downloaded.push(trackIdForStatus);
+				await appendDebugLog(`[${i + 1}] OK: ${track.title}`);
+				success++;
+			} else if (downloadedFile === null) {
+				// File was reported as already existing but path wasn't returned
+				// This happens when the downloader said it was already downloaded
+				// Let's check if a file with the expected name exists
+				const expectedFileName = sanitizeFilename(track.title || "untitled");
+				const files = await fs.readdir(tracksDir);
+				const matchingFile = files.find((f) => f.startsWith(expectedFileName));
+
+				if (matchingFile) {
+					const existingFile = path.join(tracksDir, matchingFile);
+
+					// Apply metadata and timestamps to the existing file
+					await writeTrackMetadata(existingFile, track, i + 1);
+					await setFileTimestamps(existingFile, track);
+
+					// Organize by tags if enabled
+					const settings = await loadSettings();
+					if (settings.features?.organizeByTags) {
+						await organizeTrackByTags(track, tracksDir, channelDir);
+					}
+
+					status.downloaded.push(trackIdForStatus);
+					await appendDebugLog(`[${i + 1}] EXISTS: ${track.title}`);
+					skipped++;
+				} else {
+					// No file exists, so the "already downloaded" report was incorrect
+					// Treat as a failed download
+					status.failed.push(trackIdForStatus);
+					await appendDebugLog(
+						`[${i + 1}] ERROR: ${track.title} - Download reported as already complete but no file found`,
+					);
+					failed++;
+				}
+			} else {
+				// downloadedFile is defined but doesn't exist on disk - this shouldn't happen
+				status.failed.push(trackIdForStatus);
+				await appendDebugLog(
+					debugLog,
+					`[${i + 1}] ERROR: ${track.title} - Download process completed but file not found`,
+				);
+				failed++;
+			}
+
+			// Remove from failed list if it was there
+			status.failed = status.failed.filter((id) => id !== trackIdForStatus);
+		} catch (err) {
+			console.error(`    ✗ Failed: ${err.message}`);
+			status.failed.push(trackIdForStatus);
+			await appendDebugLog(
+				debugLog,
+				`[${i + 1}] ERROR: ${track.title} - ${err.message}`,
+			);
+			failed++;
+		}
+
+		// Save status after each track
+		await saveStatus(channelDir, status);
+	}
+
+	// Create local m3u playlist
+	await createLocalPlaylist(channelSlug, tracksDir, tracks);
+
+	// Final summary
+	await appendDebugLog(
+		`\nSession complete: ${success} downloaded, ${skipped} skipped, ${failed} failed`,
+	);
+	console.log(`  ✓ Downloaded: ${success} tracks`);
+	if (skipped > 0) {
+		console.log(`  ⊙ Skipped: ${skipped} tracks (already downloaded)`);
+	}
+	if (failed > 0) {
+		console.log(`  ✗ Failed: ${failed} tracks`);
+	}
+}
+
+/**
+ * Rebuild status from existing files in the tracks directory
+ */
+export async function rebuildStatusFromFiles(channelDir, tracks) {
+	const tracksDir = path.join(channelDir, "tracks");
+	let existingFiles = [];
+	try {
+		existingFiles = await fs.readdir(tracksDir);
+	} catch (_err) {
+		// If directory doesn't exist, return empty status
+		return {
+			downloaded: [],
+			failed: [],
+			lastUpdated: new Date().toISOString(),
+		};
+	}
+
+	const status = {
+		downloaded: [],
+		failed: [],
+		lastUpdated: new Date().toISOString(),
+	};
+
+	// For each track, check if a corresponding file exists
+	for (let i = 0; i < tracks.length; i++) {
+		const track = tracks[i];
+		const trackId = track.id || `${i}-${sanitizeFilename(track.title || "untitled")}`;
+		const expectedFileName = `${sanitizeFilename(track.title || "untitled")}`;
+
+		// Check if file exists by name
+		let fileExists = existingFiles.some((file) =>
+			file.startsWith(expectedFileName),
+		);
+
+		// Also check for files with the track ID in brackets
+		if (track.id && !fileExists) {
+			fileExists = existingFiles.some((file) =>
+				file.includes(`[${track.id}]`),
+			);
+		}
+		
+		// Also check for files with YouTube ID in brackets
+		const youtubeId = extractYouTubeId(track.url);
+		if (youtubeId && !fileExists) {
+			fileExists = existingFiles.some((file) =>
+				file.includes(`[${youtubeId}]`),
+			);
+		}
+
+		if (fileExists) {
+			status.downloaded.push(trackId);
+		}
+	}
+
+	return status;
 }
 
 /**
  * Download a single track using yt-dlp or youtube-dl
  * Returns the path to the downloaded file if successful, or null if file already existed
  */
-async function downloadTrack(track, outputDir, prefix) {
-  // Load settings
-  const settings = await loadSettings()
+async function downloadTrack(track, outputDir) {
+	// Load settings
+	const settings = await loadSettings();
 
-  return new Promise((resolve, reject) => {
-    const sanitizedTitle = sanitizeFilename(track.title || 'untitled')
-    const outputTemplate = path.join(outputDir, `${prefix}-${sanitizedTitle}.%(ext)s`)
+	return new Promise((resolve, reject) => {
+		const sanitizedTitle = sanitizeFilename(track.title || "untitled");
+		// Use Radio4000 track ID for unique identification, fallback to YouTube ID
+		const trackId = track.id || extractYouTubeId(track.url);
+		const fileNameWithId = trackId ? `${sanitizedTitle} [${trackId}]` : sanitizedTitle;
+		const outputTemplate = path.join(outputDir, `${fileNameWithId}.%(ext)s`);
 
-    // Choose downloader (yt-dlp or youtube-dl)
-    const downloader = settings.downloader || 'yt-dlp'
+		// Choose downloader (yt-dlp or youtube-dl)
+		const downloader = settings.downloader || "yt-dlp";
 
-    const args = [
-      '--format', settings.ytdlp.format,
-      '--extract-audio',
-      '--audio-format', settings.ytdlp.audioFormat,
-      '--audio-quality', settings.ytdlp.audioQuality,
-      '--output', outputTemplate,
-      '--no-playlist',
-      '--newline',  // Progress on separate lines
-    ]
+		const args = [
+			"--format",
+			settings.ytdlp.format,
+			"--extract-audio",
+			"--audio-format",
+			settings.ytdlp.audioFormat,
+			"--audio-quality",
+			settings.ytdlp.audioQuality,
+			"--output",
+			outputTemplate,
+			"--no-playlist",
+			"--newline", // Progress on separate lines
+		];
 
-    // Add thumbnail embedding if enabled in settings
-    if (settings.ytdlp.embedThumbnail) {
-      args.push('--embed-thumbnail')
-    }
+		// Add cookie support if configured
+		if (settings.ytdlp.cookiesFile) {
+			args.push("--cookies", settings.ytdlp.cookiesFile);
+		}
+		// Add cookies-from-browser option if configured
+		else if (settings.ytdlp.cookiesFromBrowser) {
+			args.push("--cookies-from-browser", settings.ytdlp.cookiesFromBrowser);
+		}
 
-    // Optionally write thumbnail as separate file if also wanted
-    if (settings.ytdlp.writeThumbnail) {
-      args.push('--write-thumbnail')
-    }
+		// Add thumbnail embedding if enabled in settings
+		if (settings.ytdlp.embedThumbnail) {
+			args.push("--embed-thumbnail");
+		}
 
-    // Note: We don't add metadata with downloader as we'll add it ourselves with node-id3
+		// Optionally write thumbnail as separate file if also wanted
+		if (settings.ytdlp.writeThumbnail) {
+			args.push("--write-thumbnail");
+		}
 
-    args.push(track.url)
+		// Note: We don't add metadata with downloader as we'll add it ourselves with node-id3
 
-    // Spawn the process - we'll track it and kill all children if needed
-    // Spawn with stdio to properly track and kill process tree
-    const proc = spawn(downloader, args, {
-      stdio: ['ignore', 'pipe', 'pipe'] // stdin: ignore, stdout: pipe, stderr: pipe
-    })
+		args.push(track.url);
 
-    // Track the current process for cleanup
-    currentDownloadProcess = proc
+		// Spawn the process - we'll track it and kill all children if needed
+		// Spawn with stdio to properly track and kill process tree
+		const proc = spawn(downloader, args, {
+			stdio: ["ignore", "pipe", "pipe"], // stdin: ignore, stdout: pipe, stderr: pipe
+		});
 
-    let stderr = ''
-    let stdout = ''
-    let downloadedFile = null
+		// Track the current process for cleanup
+		currentDownloadProcess = proc;
 
-    proc.stdout.on('data', (data) => {
-      stdout += data.toString()
-      // Show progress
-      const lines = data.toString().trim().split('\n')
-      for (const line of lines) {
-        if (line.includes('[download]') || line.includes('ETA')) {
-          console.log(`    ${line}`)
-        }
-        // Capture the destination filename
-        if (line.includes('[download] Destination:')) {
-          const match = line.match(/\[download\] Destination: (.+)/)
-          if (match) {
-            downloadedFile = match[1].trim()
-          }
-        }
-        // Also check for "has already been downloaded" which includes filename
-        if (line.includes('has already been downloaded')) {
-          const match = line.match(/\[download\] (.+) has already been downloaded/)
-          if (match) {
-            downloadedFile = match[1].trim()
-          }
-        }
-      }
-    })
+		let stderr = "";
+		let stdout = "";
+		let downloadedFile = null;
 
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString()
-    })
+		proc.stdout.on("data", (data) => {
+			stdout += data.toString();
+			// Show progress
+			const lines = data.toString().trim().split("\n");
+			for (const line of lines) {
+				if (line.includes("[download]") || line.includes("ETA")) {
+					console.log(`    ${line}`);
+				}
+				// Capture the destination filename
+				if (line.includes("[download] Destination:")) {
+					const match = line.match(/\[download\] Destination: (.+)/);
+					if (match) {
+						downloadedFile = match[1].trim();
+					}
+				}
+				// Also check for "has already been downloaded" which includes filename
+				if (line.includes("has already been downloaded")) {
+					const match = line.match(
+						/\[download\] (.+) has already been downloaded/,
+					);
+					if (match) {
+						downloadedFile = match[1].trim();
+					}
+				}
+			}
+		});
 
-    proc.on('close', async (code) => {
-      // Clear current process tracker if this is the current process
-      if (currentDownloadProcess && currentDownloadProcess === proc) {
-        currentDownloadProcess = null
-      }
+		proc.stderr.on("data", (data) => {
+			stderr += data.toString();
+		});
 
-      // If shutting down, resolve without error
-      if (isShuttingDown) {
-        resolve(null)
-        return
-      }
+		proc.on("close", async (code) => {
+			// Clear current process tracker if this is the current process
+			if (currentDownloadProcess && currentDownloadProcess === proc) {
+				currentDownloadProcess = null;
+			}
 
-      if (code === 0) {
-        // Try to find the downloaded file if we didn't capture it from output
-        if (!downloadedFile) {
-          const files = await fs.readdir(outputDir)
-          const matchingFile = files.find(f => f.startsWith(`${prefix}-${sanitizedTitle}`))
-          if (matchingFile) {
-            downloadedFile = path.join(outputDir, matchingFile)
-          }
-        }
-        resolve(downloadedFile) // Successfully downloaded
-      } else {
-        // Check if file already exists
-        if (stderr.includes('has already been downloaded') || stdout.includes('has already been downloaded')) {
-          resolve(null) // File exists, didn't download
-        } else {
-          // Include stderr in error message for debugging
-          const errorMsg = stderr.trim() || stdout.trim() || `${downloader} exited with code ${code}`
-          reject(new Error(errorMsg))
-        }
-      }
-    })
+			// If shutting down, resolve without error
+			if (isShuttingDown) {
+				resolve(null);
+				return;
+			}
 
-    proc.on('error', (err) => {
-      // Clear current process tracker on error
-      if (currentDownloadProcess && currentDownloadProcess === proc) {
-        currentDownloadProcess = null
-      }
+			if (code === 0) {
+				// Try to find the downloaded file if we didn't capture it from output
+				if (!downloadedFile) {
+					const files = await fs.readdir(outputDir);
+					const matchingFile = files.find((f) =>
+						f.startsWith(`${sanitizedTitle}`),
+					);
+					if (matchingFile) {
+						downloadedFile = path.join(outputDir, matchingFile);
+					}
+				}
+				resolve(downloadedFile); // Successfully downloaded
+			} else {
+				// Check if file already exists by searching output for the file
+				if (
+					stderr.includes("has already been downloaded") ||
+					stdout.includes("has already been downloaded")
+				) {
+					// Try to extract the filename that was reported as already downloaded
+					let alreadyDownloadedFile = null;
+					const alreadyDownloadedMatch = stdout.match(
+						/\[download\] (.+) has already been downloaded/,
+					);
+					if (alreadyDownloadedMatch) {
+						alreadyDownloadedFile = alreadyDownloadedMatch[1].trim();
+					} else {
+						// If we can't extract the filename from output, try to find the most recently created file
+						// that matches our expected pattern
+						const files = await fs.readdir(outputDir);
+						const matchingFiles = files.filter((f) =>
+							f.startsWith(sanitizedTitle),
+						);
+						if (matchingFiles.length > 0) {
+							// Find the most recently created file
+							const fileStats = await Promise.all(
+								matchingFiles.map((f) => fs.stat(path.join(outputDir, f))),
+							);
+							const latestIndex = fileStats
+								.map((stat, idx) => ({
+									index: idx,
+									mtime: stat.mtime,
+								}))
+								.sort((a, b) => b.mtime - a.mtime)[0].index;
+							alreadyDownloadedFile = matchingFiles[latestIndex];
+						}
+					}
 
-      if (err.code === 'ENOENT') {
-        reject(new Error(`${downloader} not found. Please install it.`))
-      } else {
-        reject(err)
-      }
-    })
-  })
+					if (alreadyDownloadedFile) {
+						resolve(path.join(outputDir, alreadyDownloadedFile));
+					} else {
+						resolve(null); // File was reported as already downloaded but we can't confirm location
+					}
+				} else {
+					// Include stderr in error message for debugging
+					const errorMsg =
+						stderr.trim() ||
+						stdout.trim() ||
+						`${downloader} exited with code ${code}`;
+					reject(new Error(errorMsg));
+				}
+			}
+		});
+
+		proc.on("error", (err) => {
+			// Clear current process tracker on error
+			if (currentDownloadProcess && currentDownloadProcess === proc) {
+				currentDownloadProcess = null;
+			}
+
+			if (err.code === "ENOENT") {
+				reject(new Error(`${downloader} not found. Please install it.`));
+			} else {
+				reject(err);
+			}
+		});
+	});
 }
 
 /**
  * Write ID3 metadata to downloaded track
  */
 async function writeTrackMetadata(filePath, track, trackNumber) {
-  try {
-    // Parse artist and title from track title
-    // Common formats: "Artist - Title" or just "Title"
-    let artist = ''
-    let title = track.title || 'Untitled'
+	try {
+		// Use get-artist-title package to parse artist and title from the track title
+		// Returns [artist, title] array or undefined if it can't parse
+		const artistTitle = getArtistTitle(track.title || "Untitled");
+		let artist = "";
+		let title = track.title || "Untitled";
 
-    if (title.includes(' - ')) {
-      const parts = title.split(' - ')
-      artist = parts[0].trim()
-      title = parts.slice(1).join(' - ').trim()
-    }
+		if (artistTitle && Array.isArray(artistTitle) && artistTitle.length >= 2) {
+			[artist, title] = artistTitle;
+			// Ensure both values are valid
+			artist = artist || "";
+			title = title || track.title || "Untitled";
+		}
 
-    const tags = {
-      title: title,
-      artist: artist || 'Unknown Artist',
-      comment: {
-        language: 'eng',
-        text: track.description || ''
-      },
-      trackNumber: trackNumber.toString(),
-      year: track.created_at ? new Date(track.created_at).getFullYear().toString() : '',
-      WOAF: track.url, // Official audio file webpage
-    }
+		const tags = {
+			title: title,
+			artist: artist || "Unknown Artist",
+			comment: {
+				language: "eng",
+				text: track.description || "",
+			},
+			trackNumber: trackNumber.toString(),
+			year: track.created_at
+				? new Date(track.created_at).getFullYear().toString()
+				: "",
+			WOAF: track.url, // Official audio file webpage
+		};
 
-    // Add Discogs URL if available
-    if (track.discogs_url) {
-      tags.userDefinedText = [{
-        description: 'DISCOGS_URL',
-        value: track.discogs_url
-      }]
-    }
+		// Add Discogs URL if available
+		if (track.discogs_url) {
+			if (!tags.userDefinedText) {
+				tags.userDefinedText = [];
+			}
+			tags.userDefinedText.push({
+				description: "DISCOGS_URL",
+				value: track.discogs_url,
+			});
+		}
 
-    // Write tags
-    const success = NodeID3.write(tags, filePath)
-    if (!success) {
-      console.log(`    Warning: Could not write ID3 tags to ${path.basename(filePath)}`)
-    }
-  } catch (err) {
-    console.error(`    Warning: Error writing ID3 metadata: ${err.message}`)
-  }
+		// Write tags
+		const success = NodeID3.write(tags, filePath);
+		if (!success) {
+			console.log(
+				`    Warning: Could not write ID3 tags to ${path.basename(filePath)}`,
+			);
+		}
+	} catch (err) {
+		console.error(`    Warning: Error writing ID3 metadata: ${err.message}`);
+	}
 }
 
 /**
  * Create a local m3u playlist referencing downloaded files
  */
-async function createLocalPlaylist(channelSlug, channelDir, tracks) {
-  const files = await fs.readdir(channelDir)
-  const audioFiles = files.filter(f =>
-    f.endsWith('.mp3') ||
-    f.endsWith('.opus') ||
-    f.endsWith('.m4a') ||
-    f.endsWith('.webm')
-  )
+async function createLocalPlaylist(_channelSlug, channelDir, tracks) {
+	const files = await fs.readdir(channelDir);
+	const audioFiles = files.filter(
+		(f) =>
+			f.endsWith(".mp3") ||
+			f.endsWith(".opus") ||
+			f.endsWith(".m4a") ||
+			f.endsWith(".webm"),
+	);
 
-  let m3u = '#EXTM3U\n'
-  for (const track of tracks) {
-    const title = track.title || 'Untitled'
-    m3u += `#EXTINF:-1,${title}\n`
+	let m3u = "#EXTM3U\n";
+	for (const track of tracks) {
+		const title = track.title || "Untitled";
+		m3u += `#EXTINF:-1,${title}\n`;
 
-    // Find the corresponding file
-    const file = audioFiles.find(f => f.includes(sanitizeFilename(title)))
-    if (file) {
-      m3u += `${file}\n`
-    }
-  }
+		// Find the corresponding file
+		const file = audioFiles.find((f) => f.includes(sanitizeFilename(title)));
+		if (file) {
+			m3u += `${file}\n`;
+		}
+	}
 
-  const playlistPath = path.join(channelDir, 'playlist.m3u')
-  await fs.writeFile(playlistPath, m3u)
+	const playlistPath = path.join(channelDir, "playlist.m3u");
+	await fs.writeFile(playlistPath, m3u);
 }
 
 /**
  * Set file timestamps to match track creation/update times from Radio4000
  */
 async function setFileTimestamps(filePath, track) {
-  if (!filePath || !track) return
+	if (!filePath || !track) return;
 
-  try {
-    // Use track's created_at as ctime and mtime, updated_at as atime
-    const createdTime = track.created_at ? new Date(track.created_at) : new Date()
-    const updatedTime = track.updated_at ? new Date(track.updated_at) : new Date()
+	try {
+		// Check if file exists before attempting to set timestamps
+		await fs.access(filePath);
 
-    // Set both access and modification times to match Radio4000 timestamps
-    await fs.utimes(filePath, updatedTime, createdTime)
-  } catch (err) {
-    console.error(`    Warning: Could not set timestamps for ${path.basename(filePath)}: ${err.message}`)
-  }
+		// Use track's created_at as modification time (for chronological sorting)
+		// and updated_at as access time
+		const createdTime = track.created_at
+			? new Date(track.created_at)
+			: new Date();
+		const updatedTime = track.updated_at
+			? new Date(track.updated_at)
+			: new Date();
+
+		// Set access time and modification time to match Radio4000 timestamps
+		// Note: fs.utimes(path, atime, mtime) - atime first, then mtime
+		// To sort tracks chronologically by when they were added to the channel,
+		// we set mtime (modification time) to the track's created_at time
+		await fs.utimes(filePath, updatedTime, createdTime);
+	} catch (err) {
+		if (err.code === "ENOENT") {
+			// File doesn't exist - this is the race condition we're trying to handle
+			console.log(
+				`    Warning: File does not exist to set timestamps: ${path.basename(filePath)}`,
+			);
+		} else {
+			console.error(
+				`    Warning: Could not set timestamps for ${path.basename(filePath)}: ${err.message}`,
+			);
+		}
+	}
 }
 
 /**
- * Sanitize filename
- */
-function sanitizeFilename(str) {
-	// hello anyone? can you see what I type?
-  return str
-    .replace(/[^a-z0-9-_\s]/gi, '')
-    .replace(/\s+/g, '-')
-    .toLowerCase()
-    .substring(0, 50)
-}
-
-/**
- * Load status.json from channel directory
+ * Load status.json from channel directory (currently disabled to avoid creating status files)
  */
 async function loadStatus(channelDir) {
-  const statusFile = path.join(channelDir, 'status.json')
-
-  try {
-    const data = await fs.readFile(statusFile, 'utf-8')
-    return JSON.parse(data)
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      // File doesn't exist, return default status
-      return {
-        downloaded: [],
-        failed: [],
-        lastUpdated: new Date().toISOString()
-      }
-    }
-    throw err
-  }
+	// Return default status to avoid creating status.json files
+	return {
+		downloaded: [],
+		failed: [],
+		lastUpdated: new Date().toISOString(),
+	};
 }
 
 /**
  * Save status.json to channel directory
  */
+/**
+ * Save status.json to channel directory (currently disabled to avoid creating status files)
+ */
 async function saveStatus(channelDir, status) {
-  const statusFile = path.join(channelDir, 'status.json')
-  status.lastUpdated = new Date().toISOString()
-  await fs.writeFile(statusFile, JSON.stringify(status, null, 2))
+	// Do nothing to avoid creating status.json files
+	return;
 }
 
 /**
- * Append a line to debug.txt
+ * Append a line to debug.txt (currently disabled to avoid creating debug files)
  */
 async function appendDebugLog(debugFile, message) {
-  const timestamp = new Date().toISOString()
-  const line = `[${timestamp}] ${message}\n`
-  await fs.appendFile(debugFile, line)
+	// Do nothing to avoid creating debug.txt files
+	return;
 }
 
 /**
  * Organize a single track by tags using symlinks
  */
-async function organizeTrackByTags(track, tracksDir, channelDir, prefix) {
-  const sanitizedTitle = sanitizeFilename(track.title || 'untitled')
+async function organizeTrackByTags(track, tracksDir, channelDir) {
+	const sanitizedTitle = sanitizeFilename(track.title || "untitled");
 
-  // Find the actual downloaded file
-  const files = await fs.readdir(tracksDir)
-  const trackFile = files.find(f => f.startsWith(`${prefix}-${sanitizedTitle}`))
+	// Find the actual downloaded file
+	const files = await fs.readdir(tracksDir);
+	const trackFile = files.find((f) => f.startsWith(`${sanitizedTitle}`));
 
-  if (!trackFile) {
-    console.log(`    Warning: Could not find downloaded file for ${track.title}`)
-    return
-  }
+	if (!trackFile) {
+		console.log(
+			`    Warning: Could not find downloaded file for ${track.title}`,
+		);
+		return;
+	}
 
-  // Parse tags from track description or title
-  const tags = extractTags(track)
+	// Parse tags from track description or title
+	const tags = extractTags(track);
 
-  if (tags.length === 0) {
-    // If no tags, add to 'untagged' folder
-    tags.push('untagged')
-  }
+	if (tags.length === 0) {
+		// If no tags, add to 'untagged' folder
+		tags.push("untagged");
+	}
 
-  // Create tags directory
-  const tagsDir = path.join(channelDir, 'tags')
-  await fs.mkdir(tagsDir, { recursive: true })
+	// Create tags directory
+	const tagsDir = path.join(channelDir, "tags");
+	await fs.mkdir(tagsDir, { recursive: true });
 
-  // Create symlinks for each tag
-  for (const tag of tags) {
-    const tagDir = path.join(tagsDir, sanitizeFilename(tag))
-    await fs.mkdir(tagDir, { recursive: true })
+	// Create symlinks for each tag
+	for (const tag of tags) {
+		const tagDir = path.join(tagsDir, sanitizeFilename(tag));
+		await fs.mkdir(tagDir, { recursive: true });
 
-    const sourcePath = path.join(tracksDir, trackFile)
-    const linkPath = path.join(tagDir, trackFile)
+		const sourcePath = path.join(tracksDir, trackFile);
+		const linkPath = path.join(tagDir, trackFile);
 
-    try {
-      // Remove existing symlink if it exists
-      try {
-        await fs.unlink(linkPath)
-      } catch (err) {
-        if (err.code !== 'ENOENT') throw err
-      }
+		try {
+			// Remove existing symlink if it exists
+			try {
+				await fs.unlink(linkPath);
+			} catch (err) {
+				if (err.code !== "ENOENT") throw err;
+			}
 
-      // Create relative symlink
-      const relativePath = path.relative(tagDir, sourcePath)
-      await fs.symlink(relativePath, linkPath)
-    } catch (err) {
-      console.error(`    Warning: Could not create symlink for ${trackFile}: ${err.message}`)
-    }
-  }
+			// Create relative symlink
+			const relativePath = path.relative(tagDir, sourcePath);
+			await fs.symlink(relativePath, linkPath);
+		} catch (err) {
+			console.error(
+				`    Warning: Could not create symlink for ${trackFile}: ${err.message}`,
+			);
+		}
+	}
 
-  if (tags.length > 0) {
-    console.log(`    ✓ Organized by tags: ${tags.join(', ')}`)
-  }
+	if (tags.length > 0) {
+		console.log(`    ✓ Organized by tags: ${tags.join(", ")}`);
+	}
 }
 
 /**
  * Organize all tracks by tags using symlinks (used for initial organization)
  */
-async function organizeByTags(channelDir, tracksDir, tracks) {
-  console.log('  📂 Organizing tracks by tags...')
+async function _organizeByTags(channelDir, tracksDir, tracks) {
+	console.log("  📂 Organizing tracks by tags...");
 
-  // Create tags directory
-  const tagsDir = path.join(channelDir, 'tags')
-  await fs.mkdir(tagsDir, { recursive: true })
+	// Create tags directory
+	const tagsDir = path.join(channelDir, "tags");
+	await fs.mkdir(tagsDir, { recursive: true });
 
-  // Process each track
-  for (let i = 0; i < tracks.length; i++) {
-    const track = tracks[i]
-    const prefix = String(i + 1).padStart(3, '0')
+	// Process each track
+	for (let i = 0; i < tracks.length; i++) {
+		const track = tracks[i];
 
-    await organizeTrackByTags(track, tracksDir, channelDir, prefix)
-  }
+		await organizeTrackByTags(track, tracksDir, channelDir);
+	}
 
-  // Count tag directories
-  const tagDirs = await fs.readdir(path.join(channelDir, 'tags'))
-  console.log(`  ✓ Organized into ${tagDirs.length} tag folders`)
-}
-
-/**
- * Extract tags from track metadata
- * Tags can come from description field (hashtags) or from structured metadata
- */
-function extractTags(track) {
-  const tags = []
-
-  // Check description for hashtags
-  if (track.description) {
-    const hashtags = track.description.match(/#[\w]+/g)
-    if (hashtags) {
-      tags.push(...hashtags.map(tag => tag.substring(1).toLowerCase()))
-    }
-  }
-
-  // Check if track has a tags field (if supported by API)
-  if (track.tags && Array.isArray(track.tags)) {
-    tags.push(...track.tags.map(tag => tag.toLowerCase()))
-  }
-
-  // Remove duplicates
-  return [...new Set(tags)]
+	// Count tag directories
+	const tagDirs = await fs.readdir(path.join(channelDir, "tags"));
+	console.log(`  ✓ Organized into ${tagDirs.length} tag folders`);
 }
 
 /**
  * Sync channel directory using rsync
  */
 export async function syncChannel(channelSlug, destination) {
-  const settings = await loadSettings()
+	const settings = await loadSettings();
 
-  if (!settings.features || !settings.features.rsyncEnabled) {
-    console.log('  ⊘ rsync sync is disabled in settings')
-    return
-  }
+	if (!settings.features || !settings.features.rsyncEnabled) {
+		console.log("  ⊘ rsync sync is disabled in settings");
+		return;
+	}
 
-  const channelDir = path.join(config.downloadDir, channelSlug)
+	const channelDir = path.join(config.downloadDir, channelSlug);
 
-  return new Promise((resolve, reject) => {
-    console.log(`  🔄 Syncing ${channelSlug} to ${destination}...`)
+	return new Promise((resolve, reject) => {
+		console.log(`  🔄 Syncing ${channelSlug} to ${destination}...`);
 
-    const args = [
-      '-avz',           // archive, verbose, compress
-      '--progress',     // show progress
-      '--delete',       // delete files that don't exist in source
-      `${channelDir}/`, // source (trailing slash is important)
-      destination       // destination
-    ]
+		const args = [
+			"-avz", // archive, verbose, compress
+			"--progress", // show progress
+			"--delete", // delete files that don't exist in source
+			`${channelDir}/`, // source (trailing slash is important)
+			destination, // destination
+		];
 
-    const proc = spawn('rsync', args)
+		const proc = spawn("rsync", args);
 
-    proc.stdout.on('data', (data) => {
-      console.log(`    ${data.toString().trim()}`)
-    })
+		proc.stdout.on("data", (data) => {
+			console.log(`    ${data.toString().trim()}`);
+		});
 
-    proc.stderr.on('data', (data) => {
-      console.error(`    ${data.toString().trim()}`)
-    })
+		proc.stderr.on("data", (data) => {
+			console.error(`    ${data.toString().trim()}`);
+		});
 
-    proc.on('close', (code) => {
-      if (code === 0) {
-        console.log(`  ✓ Sync completed`)
-        resolve()
-      } else {
-        reject(new Error(`rsync exited with code ${code}`))
-      }
-    })
+		proc.on("close", (code) => {
+			if (code === 0) {
+				console.log(`  ✓ Sync completed`);
+				resolve();
+			} else {
+				reject(new Error(`rsync exited with code ${code}`));
+			}
+		});
 
-    proc.on('error', (err) => {
-      if (err.code === 'ENOENT') {
-        reject(new Error('rsync not found. Please install rsync.'))
-      } else {
-        reject(err)
-      }
-    })
-  })
+		proc.on("error", (err) => {
+			if (err.code === "ENOENT") {
+				reject(new Error("rsync not found. Please install rsync."));
+			} else {
+				reject(err);
+			}
+		});
+	});
 }
 
 /**
  * Stop all downloads and cleanup
  */
 export async function stopDownloads() {
-  console.log('\n⏹  Stopping downloads...')
+	console.log("\n⏹  Stopping downloads...");
 
-  // Set shutdown flag to stop queue processing
-  isShuttingDown = true
+	// Set shutdown flag to stop queue processing
+	isShuttingDown = true;
 
-  // Clear the queue
-  const queuedCount = queue.length
-  queue.length = 0
+	// Clear the queue
+	const queuedCount = queue.length;
+	queue.length = 0;
 
-  if (queuedCount > 0) {
-    console.log(`  Cleared ${queuedCount} queued download(s)`)
-  }
+	if (queuedCount > 0) {
+		console.log(`  Cleared ${queuedCount} queued download(s)`);
+	}
 
-  // Kill current download process if running
-  if (currentDownloadProcess) {
-    console.log('  Attempting to stop active download...')
+	// Kill current download process if running
+	if (currentDownloadProcess) {
+		console.log("  Attempting to stop active download...");
 
-    try {
-      // Get the process ID before attempting to kill
-      const pid = currentDownloadProcess.pid;
+		try {
+			// Get the process ID before attempting to kill
+			const pid = currentDownloadProcess.pid;
 
-      console.log(`  Killing process tree for PID: ${pid}`)
+			console.log(`  Killing process tree for PID: ${pid}`);
 
-      // On Unix-like systems, kill the entire process group by using negative PID
-      if (process.platform !== 'win32') {
-        try {
-          // Kill the entire process group with SIGTERM first
-          process.kill(-pid, 'SIGTERM');
-          console.log(`  Sent SIGTERM to process group: ${-pid}`)
-        } catch (groupKillErr) {
-          // If process group kill fails, fall back to individual process kill
-          console.log(`  Process group kill failed: ${groupKillErr.message}`)
-          try {
-            currentDownloadProcess.kill('SIGTERM');
-          } catch (individualKillErr) {
-            console.log(`  Individual process kill also failed: ${individualKillErr.message}`)
-          }
-        }
-      } else {
-        // On Windows, try to kill the individual process
-        currentDownloadProcess.kill('SIGTERM');
-      }
+			// On Unix-like systems, kill the entire process group by using negative PID
+			if (process.platform !== "win32") {
+				try {
+					// Kill the entire process group with SIGTERM first
+					process.kill(-pid, "SIGTERM");
+					console.log(`  Sent SIGTERM to process group: ${-pid}`);
+				} catch (groupKillErr) {
+					// If process group kill fails, fall back to individual process kill
+					console.log(`  Process group kill failed: ${groupKillErr.message}`);
+					try {
+						currentDownloadProcess.kill("SIGTERM");
+					} catch (individualKillErr) {
+						console.log(
+							`  Individual process kill also failed: ${individualKillErr.message}`,
+						);
+					}
+				}
+			} else {
+				// On Windows, try to kill the individual process
+				currentDownloadProcess.kill("SIGTERM");
+			}
 
-      // Wait a bit to allow graceful shutdown
-      await new Promise(resolve => setTimeout(resolve, 500))
+			// Wait a bit to allow graceful shutdown
+			await new Promise((resolve) => setTimeout(resolve, 500));
 
-      // If process still exists, send SIGKILL
-      if (currentDownloadProcess && !currentDownloadProcess.killed) {
-        if (process.platform !== 'win32') {
-          try {
-            // Kill the process group with SIGKILL
-            process.kill(-pid, 'SIGKILL');
-            console.log(`  Sent SIGKILL to process group: ${-pid}`)
-          } catch (groupKillErr) {
-            console.log(`  Process group SIGKILL failed: ${groupKillErr.message}`)
-            try {
-              currentDownloadProcess.kill('SIGKILL');
-            } catch (individualKillErr) {
-              console.log(`  Individual process SIGKILL also failed: ${individualKillErr.message}`)
-            }
-          }
-        } else {
-          // On Windows, send SIGKILL to individual process
-          currentDownloadProcess.kill('SIGKILL');
-        }
-      }
-    } catch (err) {
-      console.log(`  Error stopping process: ${err.message}`)
-    }
+			// If process still exists, send SIGKILL
+			if (currentDownloadProcess && !currentDownloadProcess.killed) {
+				if (process.platform !== "win32") {
+					try {
+						// Kill the process group with SIGKILL
+						process.kill(-pid, "SIGKILL");
+						console.log(`  Sent SIGKILL to process group: ${-pid}`);
+					} catch (groupKillErr) {
+						console.log(
+							`  Process group SIGKILL failed: ${groupKillErr.message}`,
+						);
+						try {
+							currentDownloadProcess.kill("SIGKILL");
+						} catch (individualKillErr) {
+							console.log(
+								`  Individual process SIGKILL also failed: ${individualKillErr.message}`,
+							);
+						}
+					}
+				} else {
+					// On Windows, send SIGKILL to individual process
+					currentDownloadProcess.kill("SIGKILL");
+				}
+			}
+		} catch (err) {
+			console.log(`  Error stopping process: ${err.message}`);
+		}
 
-    // Always clear the reference
-    currentDownloadProcess = null
-  } else {
-    console.log('  No active download process to stop')
-  }
+		// Always clear the reference
+		currentDownloadProcess = null;
+	} else {
+		console.log("  No active download process to stop");
+	}
 
-  // Wait a bit for processes to clean up
-  await new Promise(resolve => setTimeout(resolve, 100))
+	// Wait a bit for processes to clean up
+	await new Promise((resolve) => setTimeout(resolve, 100));
 
-  console.log('✓ Downloads stopped')
+	console.log("✓ Downloads stopped");
 }
 
 /**
  * Check if yt-dlp is installed
  */
 export async function checkYtdlp() {
-  return new Promise((resolve) => {
-    const proc = spawn('yt-dlp', ['--version'])
-    proc.on('close', (code) => resolve(code === 0))
-    proc.on('error', () => resolve(false))
-  })
+	return new Promise((resolve) => {
+		const proc = spawn("yt-dlp", ["--version"]);
+		proc.on("close", (code) => resolve(code === 0));
+		proc.on("error", () => resolve(false));
+	});
 }
