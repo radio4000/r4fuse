@@ -1,3 +1,5 @@
+import type { Track } from "../types.js";
+
 /**
  * Content formatting and tag extraction utilities
  */
@@ -6,20 +8,20 @@
  * Extract tags from track metadata
  * Tags can come from description field (hashtags) or from structured metadata
  */
-export function extractTagsFromTrack(track) {
-	const tags = [];
+export function extractTagsFromTrack(track: Track): string[] {
+	const tags: string[] = [];
 
 	// Check description for hashtags
 	if (track.description) {
 		const hashtags = track.description.match(/#[\w]+/g);
 		if (hashtags) {
-			tags.push(...hashtags.map((tag) => tag.substring(1).toLowerCase()));
+			tags.push(...hashtags.map((tag: string) => tag.substring(1).toLowerCase()));
 		}
 	}
 
 	// Check if track has a tags field (if supported by API)
 	if (track.tags && Array.isArray(track.tags)) {
-		tags.push(...track.tags.map((tag) => tag.toLowerCase()));
+		tags.push(...track.tags.map((tag: string) => tag.toLowerCase()));
 	}
 
 	// Remove duplicates
@@ -29,7 +31,7 @@ export function extractTagsFromTrack(track) {
 /**
  * Format track content for .txt files
  */
-export function formatTrackContent(track) {
+export function formatTrackContent(track: Track): string {
 	const lines = [`Title: ${track.title || "Untitled"}`, `URL: ${track.url}`];
 
 	if (track.description) {

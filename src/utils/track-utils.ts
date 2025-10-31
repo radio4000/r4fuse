@@ -2,12 +2,17 @@
  * Download-specific utilities for track organization and metadata
  */
 
+interface Track {
+  description?: string;
+  tags?: string[];
+}
+
 /**
  * Extract tags from track metadata
  * Tags can come from description field (hashtags) or from structured metadata
  */
-export function extractTags(track) {
-	const tags = [];
+export function extractTags(track: Track): string[] {
+	const tags: string[] = [];
 
 	// Check description for hashtags
 	if (track.description) {

@@ -1,7 +1,7 @@
 import assert from 'assert'
 import path from 'path'
 import fs from 'fs/promises'
-import { checkYtdlp } from '../src/download.js'
+import { checkYtdlp } from '../dist/download.js'
 import {
   createTempDir,
   cleanupDir,

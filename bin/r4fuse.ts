@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { mount, unmount, status } from '../dist/index.js'
-import { checkYtdlp } from '../dist/download.js'
+import { mount, unmount, status } from '../src/index.js'
+import { checkYtdlp } from '../src/download.js'
 import fs from 'fs'
 import path from 'path'
 

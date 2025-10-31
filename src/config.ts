@@ -8,7 +8,69 @@ loadEnv();
 
 const HOME = os.homedir();
 
-export const config = {
+// Define types for our configuration
+interface YtdlpConfig {
+	format: string;
+	extractAudio: boolean;
+	audioFormat: string;
+	audioQuality: string;
+	addMetadata: boolean;
+	embedThumbnail: boolean;
+	writeThumbnail: boolean;
+	cookiesFile: string;
+	cookiesFromBrowser: string;
+}
+
+interface SupabaseConfig {
+	url: string | undefined;
+	key: string | undefined;
+}
+
+interface MountConfig {
+	debug: boolean;
+}
+
+interface FeaturesConfig {
+	organizeByTags: boolean;
+	rsyncEnabled: boolean;
+}
+
+interface Config {
+	// Mount point for FUSE filesystem
+	mountPoint: string;
+
+	// Where to download actual audio files
+	downloadDir: string;
+
+	// Cache directory
+	cacheDir: string;
+
+	// State directory (logs, download queue, etc.)
+	stateDir: string;
+
+	// Config file
+	configFile: string;
+
+	// Cache TTL (5 minutes)
+	cacheTTL: number;
+
+	// Supabase credentials
+	supabase: SupabaseConfig;
+
+	// yt-dlp options (defaults, can be overridden in settings.json)
+	ytdlp: YtdlpConfig;
+
+	// Downloader choice
+	downloader: string; // Can be 'yt-dlp' or 'youtube-dl'
+
+	// Mount options
+	mount: MountConfig;
+
+	// Features
+	features: FeaturesConfig;
+}
+
+export const config: Config = {
 	// Mount point for FUSE filesystem
 	mountPoint: process.env.R4_MOUNT_POINT || path.join(HOME, "mnt/radio4000"),
 
@@ -67,7 +129,7 @@ export const config = {
 /**
  * Ensure all directories exist
  */
-export async function ensureDirectories() {
+export async function ensureDirectories(): Promise<void> {
 	const dirs = [
 		config.mountPoint,
 		config.downloadDir,
@@ -84,14 +146,25 @@ export async function ensureDirectories() {
 /**
  * Get config directory path
  */
-function getConfigDir() {
+function getConfigDir(): string {
 	return path.dirname(config.configFile);
+}
+
+interface Settings {
+	ytdlp: YtdlpConfig;
+	downloader: string;
+	mount: MountConfig;
+	paths: {
+		mountPoint: string;
+		downloadDir: string;
+	};
+	features: FeaturesConfig;
 }
 
 /**
  * Load user config if it exists
  */
-export async function loadUserConfig() {
+export async function loadUserConfig(): Promise<void> {
 	try {
 		// Try loading settings.json first (new format)
 		const settingsFile = path.join(
@@ -100,7 +173,7 @@ export async function loadUserConfig() {
 		);
 		try {
 			const data = await fs.readFile(settingsFile, "utf-8");
-			const userConfig = JSON.parse(data);
+			const userConfig: Settings = JSON.parse(data);
 
 			// Apply all settings
 			if (userConfig.ytdlp) {
@@ -123,17 +196,17 @@ export async function loadUserConfig() {
 					config.downloadDir = userConfig.paths.downloadDir;
 				}
 			}
-		} catch (settingsErr) {
+		} catch (settingsErr: any) {
 			// settings.json doesn't exist, try old config.json format
 			if (settingsErr.code === "ENOENT") {
 				const data = await fs.readFile(config.configFile, "utf-8");
-				const userConfig = JSON.parse(data);
+				const userConfig: Record<string, unknown> = JSON.parse(data);
 				Object.assign(config, userConfig);
 			} else {
 				throw settingsErr;
 			}
 		}
-	} catch (err) {
+	} catch (err: any) {
 		// Config file doesn't exist, use defaults
 		if (err.code !== "ENOENT") {
 			console.warn("Warning: Could not load config file:", err.message);
@@ -144,12 +217,13 @@ export async function loadUserConfig() {
 /**
  * Load settings.json and return merged settings
  */
-export async function loadSettings() {
+export async function loadSettings(): Promise<Settings> {
 	const settingsFile = path.join(getConfigDir(), "settings.json");
 
-	const defaultSettings = {
+	const defaultSettings: Settings = {
 		ytdlp: {
 			format: "bestaudio/best",
+			extractAudio: true, // Get best audio, fallback to best overall
 			audioFormat: "mp3",
 			audioQuality: "0", // Highest quality VBR
 			addMetadata: false, // Don't add metadata via yt-dlp (we handle it ourselves)
@@ -175,7 +249,7 @@ export async function loadSettings() {
 
 	try {
 		const data = await fs.readFile(settingsFile, "utf-8");
-		const userSettings = JSON.parse(data);
+		const userSettings: Partial<Settings> = JSON.parse(data);
 		// Deep merge settings
 		return {
 			...defaultSettings,
@@ -185,7 +259,7 @@ export async function loadSettings() {
 			paths: { ...defaultSettings.paths, ...userSettings.paths },
 			features: { ...defaultSettings.features, ...userSettings.features },
 		};
-	} catch (err) {
+	} catch (err: any) {
 		if (err.code === "ENOENT") {
 			await fs.mkdir(getConfigDir(), { recursive: true });
 			await fs.writeFile(
@@ -201,7 +275,7 @@ export async function loadSettings() {
 /**
  * Load favorites.txt - one channel slug per line
  */
-export async function loadFavorites() {
+export async function loadFavorites(): Promise<string[]> {
 	const favoritesFile = path.join(getConfigDir(), "favorites.txt");
 
 	try {
@@ -210,7 +284,7 @@ export async function loadFavorites() {
 			.split("\n")
 			.map((line) => line.trim())
 			.filter((line) => line.length > 0);
-	} catch (err) {
+	} catch (err: any) {
 		if (err.code === "ENOENT") {
 			await fs.mkdir(getConfigDir(), { recursive: true });
 			await fs.writeFile(favoritesFile, "");
@@ -223,7 +297,7 @@ export async function loadFavorites() {
 /**
  * Save favorites.txt
  */
-export async function saveFavorites(favorites) {
+export async function saveFavorites(favorites: string[]): Promise<void> {
 	const favoritesFile = path.join(getConfigDir(), "favorites.txt");
 	await fs.mkdir(getConfigDir(), { recursive: true });
 	await fs.writeFile(
@@ -235,7 +309,7 @@ export async function saveFavorites(favorites) {
 /**
  * Load downloads.txt - one channel slug per line
  */
-export async function loadDownloads() {
+export async function loadDownloads(): Promise<string[]> {
 	const downloadsFile = path.join(getConfigDir(), "downloads.txt");
 
 	try {
@@ -244,7 +318,7 @@ export async function loadDownloads() {
 			.split("\n")
 			.map((line) => line.trim())
 			.filter((line) => line.length > 0);
-	} catch (err) {
+	} catch (err: any) {
 		if (err.code === "ENOENT") {
 			await fs.mkdir(getConfigDir(), { recursive: true });
 			await fs.writeFile(downloadsFile, "");
@@ -257,7 +331,7 @@ export async function loadDownloads() {
 /**
  * Save downloads.txt
  */
-export async function saveDownloads(downloads) {
+export async function saveDownloads(downloads: string[]): Promise<void> {
 	const downloadsFile = path.join(getConfigDir(), "downloads.txt");
 	await fs.mkdir(getConfigDir(), { recursive: true });
 	await fs.writeFile(
@@ -269,7 +343,7 @@ export async function saveDownloads(downloads) {
 /**
  * Add a channel to favorites
  */
-export async function addFavorite(channelSlug) {
+export async function addFavorite(channelSlug: string): Promise<boolean> {
 	const favorites = await loadFavorites();
 	if (!favorites.includes(channelSlug)) {
 		favorites.push(channelSlug);
@@ -283,7 +357,7 @@ export async function addFavorite(channelSlug) {
 /**
  * Remove a channel from favorites
  */
-export async function removeFavorite(channelSlug) {
+export async function removeFavorite(channelSlug: string): Promise<boolean> {
 	const favorites = await loadFavorites();
 	const index = favorites.indexOf(channelSlug);
 	if (index > -1) {
@@ -298,7 +372,7 @@ export async function removeFavorite(channelSlug) {
 /**
  * Add a channel to downloads
  */
-export async function addDownload(channelSlug) {
+export async function addDownload(channelSlug: string): Promise<boolean> {
 	const downloads = await loadDownloads();
 	if (!downloads.includes(channelSlug)) {
 		downloads.push(channelSlug);
@@ -312,7 +386,7 @@ export async function addDownload(channelSlug) {
 /**
  * Remove a channel from downloads
  */
-export async function removeDownload(channelSlug) {
+export async function removeDownload(channelSlug: string): Promise<boolean> {
 	const downloads = await loadDownloads();
 	const index = downloads.indexOf(channelSlug);
 	if (index > -1) {
@@ -327,7 +401,7 @@ export async function removeDownload(channelSlug) {
 /**
  * Check if a channel is in favorites
  */
-export async function isFavorite(channelSlug) {
+export async function isFavorite(channelSlug: string): Promise<boolean> {
 	const favorites = await loadFavorites();
 	return favorites.includes(channelSlug);
 }
@@ -335,7 +409,7 @@ export async function isFavorite(channelSlug) {
 /**
  * Check if a channel is in downloads
  */
-export async function isDownload(channelSlug) {
+export async function isDownload(channelSlug: string): Promise<boolean> {
 	const downloads = await loadDownloads();
 	return downloads.includes(channelSlug);
 }

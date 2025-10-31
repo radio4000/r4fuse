@@ -8,12 +8,12 @@ import {
 import { queueDownload, stopDownloads } from "./download.js";
 import * as fs from "./filesystem.js";
 
-let fuse = null;
+let fuse: any = null;
 
 /**
  * Mount the filesystem
  */
-export async function mount() {
+export async function mount(): Promise<void> {
 	// Load config and ensure directories exist
 	await loadUserConfig();
 	await ensureDirectories();
@@ -35,59 +35,73 @@ export async function mount() {
 	fuse = new Fuse(
 		config.mountPoint,
 		{
-			readdir: (path, cb) => {
+			readdir: (path: string, cb: (err: number, result?: string[]) => void) => {
 				fs.readdir(path)
 					.then((entries) => cb(0, entries))
-					.catch((err) => cb(Fuse[err.message] || Fuse.EIO));
+					.catch((err: any) => cb(err.message === 'ENOENT' ? -2 : -5)); // EIO
 			},
 
-			getattr: (path, cb) => {
+			getattr: (path: string, cb: (err: number, result?: any) => void) => {
 				fs.getattr(path)
 					.then((attrs) => cb(0, attrs))
-					.catch((err) => cb(Fuse[err.message] || Fuse.EIO));
+					.catch((err: any) => cb(err.message === 'ENOENT' ? -2 : -5)); // EIO
 			},
 
-			open: (path, flags, cb) => {
+			open: (path: string, flags: number, cb: (err: number, result?: number) => void) => {
 				fs.open(path, flags)
 					.then((fd) => cb(0, fd))
-					.catch((err) => cb(Fuse[err.message] || Fuse.EIO));
+					.catch((err: any) => cb(err.message === 'ENOENT' ? -2 : -5)); // EIO
 			},
 
-			release: (path, fd, cb) => {
+			release: (path: string, fd: number, cb: (err: number) => void) => {
 				fs.release(path, fd)
 					.then(() => cb(0))
-					.catch((err) => cb(Fuse[err.message] || Fuse.EIO));
+					.catch((err: any) => cb(err.message === 'ENOENT' ? -2 : -5)); // EIO
 			},
 
-			read: (path, fd, buffer, length, position, cb) => {
+			read: (
+				path: string,
+				fd: number,
+				buffer: Buffer,
+				length: number,
+				position: number,
+				cb: (err: number, bytesRead?: number) => void
+			) => {
 				fs.read(path, fd, buffer, length, position)
-					.then((bytesRead) => cb(bytesRead))
-					.catch((err) => cb(Fuse[err.message] || Fuse.EIO));
+					.then((bytesRead: number) => cb(0, bytesRead))
+					.catch((err: any) => cb(err.message === 'ENOENT' ? -2 : -5)); // EIO
 			},
 
-			write: (path, fd, buffer, length, position, cb) => {
+			write: (
+				path: string,
+				fd: number,
+				buffer: Buffer,
+				length: number,
+				position: number,
+				cb: (err: number, bytesWritten?: number) => void
+			) => {
 				fs.write(path, fd, buffer, length, position)
-					.then((bytesWritten) => cb(bytesWritten))
-					.catch((err) => cb(Fuse[err.message] || Fuse.EIO));
+					.then((bytesWritten: number) => cb(0, bytesWritten))
+					.catch((err: any) => cb(err.message === 'ENOENT' ? -2 : -5)); // EIO
 			},
 
-			truncate: (_path, _size, cb) => {
-				cb(Fuse.EROFS);
+			truncate: (_path: string, _size: number, cb: (err: number) => void) => {
+				cb(-30); // EROFS (Read-only file system)
 			},
 
-			chmod: (_path, _mode, cb) => {
-				cb(Fuse.EROFS);
+			chmod: (_path: string, _mode: number, cb: (err: number) => void) => {
+				cb(-30); // EROFS (Read-only file system)
 			},
 
-			chown: (_path, _uid, _gid, cb) => {
-				cb(Fuse.EROFS);
+			chown: (_path: string, _uid: number, _gid: number, cb: (err: number) => void) => {
+				cb(-30); // EROFS (Read-only file system)
 			},
 		},
 		{ debug: false },
 	);
 
 	// Mount the filesystem
-	fuse.mount((err) => {
+	fuse.mount((err: Error | null) => {
 		if (err) {
 			console.error("✗ Failed to mount filesystem:", err.message);
 			process.exit(1);
@@ -130,7 +144,7 @@ export async function mount() {
 /**
  * Shutdown gracefully: stop downloads, then unmount
  */
-async function shutdown() {
+async function shutdown(): Promise<void> {
 	console.log("\n🛑 Received shutdown signal, stopping downloads...");
 
 	// Stop any running downloads
@@ -148,7 +162,7 @@ async function shutdown() {
 /**
  * Unmount the filesystem
  */
-export async function unmount() {
+export async function unmount(): Promise<void> {
 	if (!fuse) {
 		console.log("Not mounted");
 		return;
@@ -157,7 +171,7 @@ export async function unmount() {
 	console.log("\n\n📤 Unmounting...");
 
 	return new Promise((resolve, reject) => {
-		fuse.unmount((err) => {
+		fuse.unmount((err: Error | null) => {
 			if (err) {
 				console.error("✗ Failed to unmount:", err.message);
 				reject(err);
@@ -173,7 +187,7 @@ export async function unmount() {
 /**
  * Get filesystem status
  */
-export function status() {
+export function status(): { mounted: boolean; mountPoint: string; downloadDir: string } {
 	return {
 		mounted: fuse !== null,
 		mountPoint: config.mountPoint,

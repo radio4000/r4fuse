@@ -12,19 +12,51 @@ import {
 } from "./utils/content-utils.js";
 import { parsePath, sanitizeFilename } from "./utils/path-utils.js";
 import { createSafeDate, createStat } from "./utils/timestamps.js";
+import type { Stat } from "./utils/timestamps.js";
+
+// Define types for our track and channel data
+interface Track {
+	id?: string;
+	title?: string;
+	url?: string;
+	description?: string;
+	discogs_url?: string;
+	created_at?: string;
+	updated_at?: string;
+	tags?: string[];
+}
+
+interface Channel {
+	slug: string;
+	name?: string;
+	description?: string;
+	image?: string;
+	url?: string;
+	created_at?: string;
+	updated_at?: string;
+}
+
+interface ParsedPath {
+	parts: string[];
+	root?: string;
+	channel?: string;
+	subdir?: string;
+	file?: string;
+	file2?: string;
+}
 
 // Simple request cache to prevent duplicate concurrent API calls
 // This stores promises for active requests and reuses them
-const activeRequests = new Map();
+const activeRequests = new Map<string, Promise<unknown>>();
 
 
 
 // Removed request caching - using direct API calls for fresh data
 
 // Initialize SDK
-let sdk = null;
+let sdk: any = null;
 
-export async function initSDK() {
+export async function initSDK(): Promise<void> {
 	if (!config.supabase.url || !config.supabase.key) {
 		throw new Error(
 			"Missing Supabase credentials. Set SUPABASE_URL and SUPABASE_KEY environment variables.",
@@ -47,7 +79,7 @@ export async function initSDK() {
 /**
  * Virtual filesystem structure
  */
-const structure = {
+const structure: Record<string, { type: "dir" | "file"; mode: number; content?: string }> = {
 	"/": { type: "dir", mode: 0o755 },
 	"/HELP.txt": { type: "file", mode: 0o444, content: "" },
 	"/channels": { type: "dir", mode: 0o755 },
@@ -58,8 +90,8 @@ const structure = {
 /**
  * Get filesystem stats for a path
  */
-export async function getattr(path) {
-	const parsed = parsePath(path);
+export async function getattr(path: string): Promise<Stat> {
+	const parsed: ParsedPath = parsePath(path);
 
 	// Handle root entries from structure
 	if (structure[path]) {
@@ -89,9 +121,13 @@ export async function getattr(path) {
 	// /channels/<slug>
 	if (parsed.root === "channels" && parsed.channel && !parsed.subdir) {
 		// Get channel info to use proper timestamps
-		const { data, error } = await sdk.channels.readChannel(parsed.channel);
-		if (error) throw new Error(error.message);
-		const channel = data;
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
+		const data = await sdk.channels.readChannel(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const channel: Channel = data.data;
 
 		const created_at_date = createSafeDate(channel.created_at);
 		const updated_at_date = createSafeDate(channel.updated_at);
@@ -113,13 +149,18 @@ export async function getattr(path) {
 		parsed.subdir === "tracks" &&
 		!parsed.file
 	) {
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
 		// Get channel tracks to determine the directory timestamps (based on earliest track)
-		const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-		if (error) throw new Error(error.message);
+		const data = await sdk.channels.readChannelTracks(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const tracks: Track[] = data.data;
 
 		// Use the earliest track creation date or channel creation if no tracks
-		let dirCreated = null;
-		let dirUpdated = null;
+		let dirCreated: Date | undefined = undefined;
+		let dirUpdated: Date | undefined = undefined;
 
 		if (tracks.length > 0) {
 			// Find earliest created track and latest updated track (filter out invalid dates)
@@ -133,10 +174,10 @@ export async function getattr(path) {
 
 			if (validTracks.length > 0) {
 				const sortedByCreated = [...validTracks].sort(
-					(a, b) => new Date(a.created_at) - new Date(b.created_at),
+					(a, b) => new Date(a.created_at!).getTime() - new Date(b.created_at!).getTime(),
 				);
 				const sortedByUpdated = [...validTracks].sort(
-					(a, b) => new Date(b.updated_at) - new Date(a.updated_at),
+					(a, b) => new Date(b.updated_at!).getTime() - new Date(a.updated_at!).getTime(),
 				);
 
 				dirCreated = createSafeDate(sortedByCreated[0].created_at);
@@ -144,8 +185,9 @@ export async function getattr(path) {
 			}
 		} else {
 			// Fallback to channel timestamps if no tracks (fresh from API)
-			const { data: channel, error } = await sdk.channels.readChannel(parsed.channel);
-			if (error) throw new Error(error.message);
+			const channelData = await sdk.channels.readChannel(parsed.channel);
+			if (channelData.error) throw new Error(channelData.error.message);
+			const channel: Channel = channelData.data;
 			dirCreated = createSafeDate(channel.created_at);
 			dirUpdated = createSafeDate(channel.updated_at);
 		}
@@ -167,13 +209,18 @@ export async function getattr(path) {
 		parsed.subdir === "tags" &&
 		!parsed.file
 	) {
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
 		// Get channel tracks to determine the directory timestamps (based on earliest track with tags)
-		const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-		if (error) throw new Error(error.message);
+		const data = await sdk.channels.readChannelTracks(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const tracks: Track[] = data.data;
 
 		// Use the earliest track creation date or channel creation if no tracks
-		let dirCreated = null;
-		let dirUpdated = null;
+		let dirCreated: Date | undefined = undefined;
+		let dirUpdated: Date | undefined = undefined;
 
 		if (tracks.length > 0) {
 			// Find earliest created track and latest updated track (filter out invalid dates)
@@ -187,10 +234,10 @@ export async function getattr(path) {
 
 			if (validTracks.length > 0) {
 				const sortedByCreated = [...validTracks].sort(
-					(a, b) => new Date(a.created_at) - new Date(b.created_at),
+					(a, b) => new Date(a.created_at!).getTime() - new Date(b.created_at!).getTime(),
 				);
 				const sortedByUpdated = [...validTracks].sort(
-					(a, b) => new Date(b.updated_at) - new Date(a.updated_at),
+					(a, b) => new Date(b.updated_at!).getTime() - new Date(a.updated_at!).getTime(),
 				);
 
 				dirCreated = createSafeDate(sortedByCreated[0].created_at);
@@ -198,8 +245,9 @@ export async function getattr(path) {
 			}
 		} else {
 			// Fallback to channel timestamps if no tracks (fresh from API)
-			const { data: channel, error } = await sdk.channels.readChannel(parsed.channel);
-			if (error) throw new Error(error.message);
+			const channelData = await sdk.channels.readChannel(parsed.channel);
+			if (channelData.error) throw new Error(channelData.error.message);
+			const channel: Channel = channelData.data;
 			dirCreated = createSafeDate(channel.created_at);
 			dirUpdated = createSafeDate(channel.updated_at);
 		}
@@ -222,19 +270,24 @@ export async function getattr(path) {
 		parsed.file &&
 		!parsed.file2
 	) {
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
 		// Get the tag's earliest track creation date and latest updated date
-		const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-		if (error) throw new Error(error.message);
+		const data = await sdk.channels.readChannelTracks(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const tracks: Track[] = data.data;
 
 		const tagName = parsed.file;
 		const tagTracks = tracks.filter((track) => {
 			const tags = extractTagsFromTrack(track);
-			const trackTags = tags.length > 0 ? tags : ["untagged"];
+			const trackTags = tags.length > 0 ? tags : ["untitled"];
 			return trackTags.includes(tagName);
 		});
 
-		let dirCreated = null;
-		let dirUpdated = null;
+		let dirCreated: Date | undefined = undefined;
+		let dirUpdated: Date | undefined = undefined;
 
 		if (tagTracks.length > 0) {
 			// Filter tracks with valid timestamps before sorting
@@ -248,10 +301,10 @@ export async function getattr(path) {
 
 			if (validTracks.length > 0) {
 				const sortedByCreated = [...validTracks].sort(
-					(a, b) => new Date(a.created_at) - new Date(b.created_at),
+					(a, b) => new Date(a.created_at!).getTime() - new Date(b.created_at!).getTime(),
 				);
 				const sortedByUpdated = [...validTracks].sort(
-					(a, b) => new Date(b.updated_at) - new Date(a.updated_at),
+					(a, b) => new Date(b.updated_at!).getTime() - new Date(a.updated_at!).getTime(),
 				);
 
 				dirCreated = createSafeDate(sortedByCreated[0].created_at);
@@ -281,8 +334,13 @@ export async function getattr(path) {
 			const content = await getFileContent(path);
 
 			// Get channel info to use proper timestamps for these files
-			const { data: channel, error } = await sdk.channels.readChannel(parsed.channel);
-			if (error) throw new Error(error.message);
+			if (!sdk) {
+				throw new Error("SDK not initialized");
+			}
+			
+			const data = await sdk.channels.readChannel(parsed.channel);
+			if (data.error) throw new Error(data.error.message);
+			const channel: Channel = data.data;
 
 			const created_at_date = createSafeDate(channel.created_at);
 			const updated_at_date = createSafeDate(channel.updated_at);
@@ -315,9 +373,14 @@ export async function getattr(path) {
 			});
 		}
 		if (parsed.file.endsWith(".txt")) {
+			if (!sdk) {
+				throw new Error("SDK not initialized");
+			}
+			
 			// Find the track by matching the sanitized filename
-			const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-			if (error) throw new Error(error.message);
+			const data = await sdk.channels.readChannelTracks(parsed.channel);
+			if (data.error) throw new Error(data.error.message);
+			const tracks: Track[] = data.data;
 
 			const orderedTracks = [...tracks].reverse();
 			const filename = parsed.file.replace(/\.txt$/, "");
@@ -351,9 +414,14 @@ export async function getattr(path) {
 		parsed.file2
 	) {
 		if (parsed.file2.endsWith(".txt")) {
+			if (!sdk) {
+				throw new Error("SDK not initialized");
+			}
+			
 			// Find the track by matching the sanitized filename
-			const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-			if (error) throw new Error(error.message);
+			const data = await sdk.channels.readChannelTracks(parsed.channel);
+			if (data.error) throw new Error(data.error.message);
+			const tracks: Track[] = data.data;
 
 			const orderedTracks = [...tracks].reverse();
 			const filename = parsed.file2.replace(/\.txt$/, "");
@@ -410,8 +478,8 @@ export async function getattr(path) {
 /**
  * Read directory contents
  */
-export async function readdir(path) {
-	const parsed = parsePath(path);
+export async function readdir(path: string): Promise<string[]> {
+	const parsed: ParsedPath = parsePath(path);
 
 	// Root directory
 	if (path === "/") {
@@ -421,13 +489,17 @@ export async function readdir(path) {
 	// /channels - list all channels (no caching, fresh from API)
 	if (path === "/channels") {
 		console.log("  📡 Fetching channels list (fresh from API)...");
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
 		// Fetch channels directly from API without caching
 		const startTime = Date.now();
-		const { data: channels, error } = await sdk.channels.readChannels(100);
+		const data = await sdk.channels.readChannels(100);
 		const elapsed = Date.now() - startTime;
-		console.log(`  ✅ Fetched ${channels?.length || 0} channels in ${elapsed}ms`);
-		if (error) throw new Error(error.message);
-		return [".", "..", ...channels.map((c) => c.slug)];
+		console.log(`  ✅ Fetched ${data.data?.length || 0} channels in ${elapsed}ms`);
+		if (data.error) throw new Error(data.error.message);
+		return [".", "..", ...(data.data?.map((c: any) => c.slug) || [])];
 	}
 
 	// /channels/<slug> - show channel contents
@@ -450,8 +522,13 @@ export async function readdir(path) {
 		parsed.subdir === "tracks" &&
 		!parsed.file
 	) {
-		const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-		if (error) throw new Error(error.message);
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
+		const data = await sdk.channels.readChannelTracks(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const tracks: Track[] = data.data;
 		// Reverse tracks so oldest (first added) is #1
 		const orderedTracks = [...tracks].reverse();
 		const files = ["tracks.json"];
@@ -470,11 +547,16 @@ export async function readdir(path) {
 		parsed.subdir === "tags" &&
 		!parsed.file
 	) {
-		const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-		if (error) throw new Error(error.message);
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
+		const data = await sdk.channels.readChannelTracks(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const tracks: Track[] = data.data;
 
 		// Collect all unique tags
-		const tagSet = new Set();
+		const tagSet = new Set<string>();
 		for (const track of tracks) {
 			const tags = extractTagsFromTrack(track);
 			if (tags.length === 0) {
@@ -498,12 +580,17 @@ export async function readdir(path) {
 		!path.split("/")[5]
 	) {
 		const tagName = parsed.file;
-		const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-		if (error) throw new Error(error.message);
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
+		const data = await sdk.channels.readChannelTracks(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const tracks: Track[] = data.data;
 
 		// Reverse tracks so oldest (first added) is #1
 		const orderedTracks = [...tracks].reverse();
-		const files = [];
+		const files: string[] = [];
 
 		for (let i = 0; i < orderedTracks.length; i++) {
 			const track = orderedTracks[i];
@@ -548,8 +635,8 @@ export async function readdir(path) {
 /**
  * Read file contents
  */
-export async function read(path, fd, buffer, length, position) {
-	const parsed = parsePath(path);
+export async function read(path: string, fd: number, buffer: Buffer, length: number, position: number): Promise<number> {
+	const parsed: ParsedPath = parsePath(path);
 
 	// Redirect favorites/<slug>/* and downloads/<slug>/* to channels/<slug>/*
 	if (
@@ -573,15 +660,15 @@ export async function read(path, fd, buffer, length, position) {
 /**
  * Write to files
  */
-export async function write(_path, _fd, _buffer, _length, _position) {
+export async function write(_path: string, _fd: number, _buffer: Buffer, _length: number, _position: number): Promise<number> {
 	throw new Error("EROFS");
 }
 
 /**
  * Get file content for various file types
  */
-async function getFileContent(path) {
-	const parsed = parsePath(path);
+async function getFileContent(path: string): Promise<string> {
+	const parsed: ParsedPath = parsePath(path);
 
 	// Root HELP.txt
 	if (path === "/HELP.txt") {
@@ -632,6 +719,10 @@ See README.md in the project directory for complete documentation.
 		parsed.channel &&
 		parsed.subdir === "ABOUT.txt"
 	) {
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
 		const channelPromise = sdk.channels.readChannel(parsed.channel);
 		const tracksPromise = sdk.channels.readChannelTracks(parsed.channel);
 
@@ -640,21 +731,23 @@ See README.md in the project directory for complete documentation.
 			tracksPromise,
 		]);
 
-		const { data: channel, error } = channelResult;
-		if (error) throw new Error(error.message);
+		const channel = await channelResult;
+		if (channel.error) throw new Error(channel.error.message);
+		const channelData: Channel = channel.data;
 
-		const { data: tracks, error: tracksError } = tracksResult;
-		if (tracksError) throw new Error(tracksError.message);
+		const tracks = await tracksResult;
+		if (tracks.error) throw new Error(tracks.error.message);
+		const tracksData: Track[] = tracks.data;
 
-		return `${channel.name || "Untitled Channel"}
-${"=".repeat((channel.name || "Untitled Channel").length)}
+		return `${channelData.name || "Untitled Channel"}
+${"=".repeat((channelData.name || "Untitled Channel").length)}
 
-${channel.description || "No description available."}
+${channelData.description || "No description available."}
 
 Stats:
-  Tracks: ${tracks.length}
-  Created: ${channel.created_at ? new Date(channel.created_at).toLocaleDateString() : "Unknown"}
-  ${channel.url ? `Website: ${channel.url}` : ""}
+  Tracks: ${tracksData.length}
+  Created: ${channelData.created_at ? new Date(channelData.created_at).toLocaleDateString() : "Unknown"}
+  ${channelData.url ? `Website: ${channelData.url}` : ""}
 
 Quick Access:
   info.txt      # Machine-readable metadata
@@ -673,15 +766,21 @@ Configuration:
 		parsed.channel &&
 		parsed.subdir === "image.url"
 	) {
-		const { data: channel, error } = await sdk.channels.readChannel(parsed.channel);
-		if (error) throw new Error(error.message);
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
+		const data = await sdk.channels.readChannel(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const channel: Channel = data.data;
+		
 		if (channel.image) {
 			// Check if it's already a full URL (Cloudinary)
 			if (channel.image.startsWith("http")) {
 				return `${channel.image}\n`;
 			}
 			// Otherwise construct Supabase storage URL
-			const storageUrl = config.supabase.url.replace(/\/$/, "");
+			const storageUrl = config.supabase.url!.replace(/\/$/, "");
 			return `${storageUrl}/storage/v1/object/public/channels/${channel.image}\n`;
 		}
 		return "";
@@ -693,8 +792,13 @@ Configuration:
 		parsed.channel &&
 		parsed.subdir === "tracks.m3u"
 	) {
-		const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-		if (error) throw new Error(error.message);
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
+		const data = await sdk.channels.readChannelTracks(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const tracks: Track[] = data.data;
 
 		let m3u = "#EXTM3U\n";
 		for (const track of tracks) {
@@ -711,8 +815,13 @@ Configuration:
 		parsed.subdir === "tracks" &&
 		parsed.file
 	) {
-		const { data: tracks, error } = await sdk.channels.readChannelTracks(parsed.channel);
-		if (error) throw new Error(error.message);
+		if (!sdk) {
+			throw new Error("SDK not initialized");
+		}
+		
+		const data = await sdk.channels.readChannelTracks(parsed.channel);
+		if (data.error) throw new Error(data.error.message);
+		const tracks: Track[] = data.data;
 
 		// Reverse tracks so oldest (first added) is #1
 		const orderedTracks = [...tracks].reverse();
@@ -740,7 +849,7 @@ Configuration:
 /**
  * Open file
  */
-export async function open(_path, _flags) {
+export async function open(_path: string, _flags: number): Promise<number> {
 	// Return a fake file descriptor for all files
 	return 0;
 }
@@ -748,6 +857,6 @@ export async function open(_path, _flags) {
 /**
  * Release file
  */
-export async function release(_path, _fd) {
+export async function release(_path: string, _fd: number): Promise<number> {
 	return 0;
 }

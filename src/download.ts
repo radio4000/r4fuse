@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createSdk } from "@radio4000/sdk";
@@ -9,10 +9,26 @@ import { config, loadSettings } from "./config.js";
 import { sanitizeFilename } from "./utils/path-utils.js";
 import { extractTags } from "./utils/track-utils.js";
 
+interface Track {
+  id?: string;
+  title?: string;
+  url?: string;
+  description?: string;
+  discogs_url?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface DownloadStatus {
+  downloaded: string[];
+  failed: string[];
+  lastUpdated: string;
+}
+
 /**
  * Extract YouTube ID from various YouTube URL formats
  */
-function extractYouTubeId(url) {
+function extractYouTubeId(url: string | undefined): string | null {
   if (!url) return null;
 
   // Regular expressions for different YouTube URL formats
@@ -32,17 +48,17 @@ function extractYouTubeId(url) {
   return null;
 }
 
-const queue = [];
+const queue: string[] = [];
 let isProcessing = false;
 let isShuttingDown = false;
-let currentDownloadProcess = null;
+let currentDownloadProcess: ChildProcess | null = null;
 
 // Initialize SDK
-let sdk = null;
+let sdk: any = null;
 
-function initSDK() {
+function initSDK(): void {
 	if (!sdk) {
-		const supabase = createClient(config.supabase.url, config.supabase.key);
+		const supabase = createClient(config.supabase.url!, config.supabase.key!);
 		sdk = createSdk(supabase);
 	}
 }
@@ -50,7 +66,7 @@ function initSDK() {
 /**
  * Queue a channel for download
  */
-export async function queueDownload(channelSlug) {
+export async function queueDownload(channelSlug: string): Promise<void> {
 	if (!queue.includes(channelSlug)) {
 		queue.push(channelSlug);
 		console.log(`📥 Added to queue: ${channelSlug}`);
@@ -64,21 +80,21 @@ export async function queueDownload(channelSlug) {
 /**
  * Process download queue
  */
-async function processQueue() {
+async function processQueue(): Promise<void> {
 	if (isShuttingDown || queue.length === 0) {
 		isProcessing = false;
 		return;
 	}
 
 	isProcessing = true;
-	const channelSlug = queue.shift();
+	const channelSlug = queue.shift()!;
 
 	console.log(`\n🎵 Starting download: ${channelSlug}`);
 
 	try {
 		await downloadChannel(channelSlug);
 		console.log(`✓ Completed: ${channelSlug}`);
-	} catch (err) {
+	} catch (err: any) {
 		if (!isShuttingDown) {
 			console.error(`✗ Failed to download ${channelSlug}:`, err.message);
 		}
@@ -93,16 +109,16 @@ async function processQueue() {
 /**
  * Download all tracks from a channel
  */
-async function downloadChannel(channelSlug) {
+async function downloadChannel(channelSlug: string): Promise<void> {
 	initSDK();
 
 	// Fetch channel tracks
-	let tracks, error;
+	let tracks: Track[], error: any;
 	try {
-		const response = await sdk.channels.readChannelTracks(channelSlug);
+		const response = await sdk!.channels.readChannelTracks(channelSlug);
 		tracks = response.data;
 		error = response.error;
-	} catch (e) {
+	} catch (e: any) {
 		console.error(`SDK Error fetching tracks for ${channelSlug}:`, e.message);
 		throw new Error(`Failed to fetch tracks: ${e.message}`);
 	}
@@ -129,7 +145,7 @@ async function downloadChannel(channelSlug) {
 	await fs.mkdir(tracksDir, { recursive: true });
 
 	// Load or create status tracking
-	let status = await loadStatus(channelDir);
+	let status: DownloadStatus = await loadStatus(channelDir);
 
 	// If status is empty (new channel) or potentially corrupted, rebuild from existing files
 	if (status.downloaded.length === 0) {
@@ -144,7 +160,7 @@ async function downloadChannel(channelSlug) {
 	}
 
 	// Get list of existing files to avoid re-downloading
-	const existingFiles = new Set();
+	const existingFiles = new Set<string>();
 	try {
 		const files = await fs.readdir(tracksDir);
 		files.forEach((file) => {
@@ -177,7 +193,7 @@ async function downloadChannel(channelSlug) {
 
 		// Check if already downloaded by checking for files with this name or track ID
 		const expectedSanitizedTitle = sanitizeFilename(track.title || "untitled");
-		const youtubeId = extractYouTubeId(track.url);
+		const youtubeId = extractYouTubeId(track.url || '');
 		let fileExists = Array.from(existingFiles).some((file) =>
 			file.startsWith(`${expectedSanitizedTitle}`),
 		);
@@ -190,7 +206,7 @@ async function downloadChannel(channelSlug) {
 		}
 		
 		// Also check for files with the YouTube ID in brackets
-		if (youtubeId && !fileExists) {
+		if (youtubeId && !fileExists) {  // Check if youtubeId is not null before using
 			fileExists = Array.from(existingFiles).some((file) =>
 				file.includes(`[${youtubeId}]`),
 			);
@@ -233,7 +249,7 @@ async function downloadChannel(channelSlug) {
 				}
 			}
 
-			if (fileActuallyExists) {
+			if (fileActuallyExists && downloadedFile) {
 				// Write ID3 metadata to the downloaded file
 				await writeTrackMetadata(downloadedFile, track, i + 1);
 
@@ -294,7 +310,7 @@ async function downloadChannel(channelSlug) {
 
 			// Remove from failed list if it was there
 			status.failed = status.failed.filter((id) => id !== trackIdForStatus);
-		} catch (err) {
+		} catch (err: any) {
 			console.error(`    ✗ Failed: ${err.message}`);
 			status.failed.push(trackIdForStatus);
 			await appendDebugLog(
@@ -327,9 +343,9 @@ async function downloadChannel(channelSlug) {
 /**
  * Rebuild status from existing files in the tracks directory
  */
-export async function rebuildStatusFromFiles(channelDir, tracks) {
+export async function rebuildStatusFromFiles(channelDir: string, tracks: Track[]): Promise<DownloadStatus> {
 	const tracksDir = path.join(channelDir, "tracks");
-	let existingFiles = [];
+	let existingFiles: string[] = [];
 	try {
 		existingFiles = await fs.readdir(tracksDir);
 	} catch (_err) {
@@ -341,7 +357,7 @@ export async function rebuildStatusFromFiles(channelDir, tracks) {
 		};
 	}
 
-	const status = {
+	const status: DownloadStatus = {
 		downloaded: [],
 		failed: [],
 		lastUpdated: new Date().toISOString(),
@@ -366,8 +382,8 @@ export async function rebuildStatusFromFiles(channelDir, tracks) {
 		}
 		
 		// Also check for files with YouTube ID in brackets
-		const youtubeId = extractYouTubeId(track.url);
-		if (youtubeId && !fileExists) {
+		const youtubeId = extractYouTubeId(track.url || '');
+		if (youtubeId && !fileExists) {  // Check if youtubeId is not null before using
 			fileExists = existingFiles.some((file) =>
 				file.includes(`[${youtubeId}]`),
 			);
@@ -385,14 +401,14 @@ export async function rebuildStatusFromFiles(channelDir, tracks) {
  * Download a single track using yt-dlp or youtube-dl
  * Returns the path to the downloaded file if successful, or null if file already existed
  */
-async function downloadTrack(track, outputDir) {
+async function downloadTrack(track: Track, outputDir: string): Promise<string | null> {
 	// Load settings
 	const settings = await loadSettings();
 
 	return new Promise((resolve, reject) => {
 		const sanitizedTitle = sanitizeFilename(track.title || "untitled");
 		// Use Radio4000 track ID for unique identification, fallback to YouTube ID
-		const trackId = track.id || extractYouTubeId(track.url);
+		const trackId = track.id || extractYouTubeId(track.url || '');
 		const fileNameWithId = trackId ? `${sanitizedTitle} [${trackId}]` : sanitizedTitle;
 		const outputTemplate = path.join(outputDir, `${fileNameWithId}.%(ext)s`);
 
@@ -434,7 +450,7 @@ async function downloadTrack(track, outputDir) {
 
 		// Note: We don't add metadata with downloader as we'll add it ourselves with node-id3
 
-		args.push(track.url);
+		args.push(track.url!);
 
 		// Spawn the process - we'll track it and kill all children if needed
 		// Spawn with stdio to properly track and kill process tree
@@ -447,7 +463,7 @@ async function downloadTrack(track, outputDir) {
 
 		let stderr = "";
 		let stdout = "";
-		let downloadedFile = null;
+		let downloadedFile: string | null = null;
 
 		proc.stdout.on("data", (data) => {
 			stdout += data.toString();
@@ -511,7 +527,7 @@ async function downloadTrack(track, outputDir) {
 					stdout.includes("has already been downloaded")
 				) {
 					// Try to extract the filename that was reported as already downloaded
-					let alreadyDownloadedFile = null;
+					let alreadyDownloadedFile: string | null = null;
 					const alreadyDownloadedMatch = stdout.match(
 						/\[download\] (.+) has already been downloaded/,
 					);
@@ -534,7 +550,7 @@ async function downloadTrack(track, outputDir) {
 									index: idx,
 									mtime: stat.mtime,
 								}))
-								.sort((a, b) => b.mtime - a.mtime)[0].index;
+								.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())[0].index;
 							alreadyDownloadedFile = matchingFiles[latestIndex];
 						}
 					}
@@ -555,13 +571,13 @@ async function downloadTrack(track, outputDir) {
 			}
 		});
 
-		proc.on("error", (err) => {
+		proc.on("error", (err: any) => {
 			// Clear current process tracker on error
 			if (currentDownloadProcess && currentDownloadProcess === proc) {
 				currentDownloadProcess = null;
 			}
 
-			if (err.code === "ENOENT") {
+			if (err.code === "ENOENT") {  // This is still an issue because err might not have 'code'
 				reject(new Error(`${downloader} not found. Please install it.`));
 			} else {
 				reject(err);
@@ -573,7 +589,7 @@ async function downloadTrack(track, outputDir) {
 /**
  * Write ID3 metadata to downloaded track
  */
-async function writeTrackMetadata(filePath, track, trackNumber) {
+async function writeTrackMetadata(filePath: string, track: Track, trackNumber: number): Promise<void> {
 	try {
 		// Use get-artist-title package to parse artist and title from the track title
 		// Returns [artist, title] array or undefined if it can't parse
@@ -588,7 +604,7 @@ async function writeTrackMetadata(filePath, track, trackNumber) {
 			title = title || track.title || "Untitled";
 		}
 
-		const tags = {
+		const tags: any = {
 			title: title,
 			artist: artist || "Unknown Artist",
 			comment: {
@@ -599,7 +615,7 @@ async function writeTrackMetadata(filePath, track, trackNumber) {
 			year: track.created_at
 				? new Date(track.created_at).getFullYear().toString()
 				: "",
-			WOAF: track.url, // Official audio file webpage
+			// WOAF: track.url, // Official audio file webpage - not standard, using userDefinedText instead
 		};
 
 		// Add Discogs URL if available
@@ -613,6 +629,17 @@ async function writeTrackMetadata(filePath, track, trackNumber) {
 			});
 		}
 
+		// Add track URL as a custom field
+		if (track.url) {
+			if (!tags.userDefinedText) {
+				tags.userDefinedText = [];
+			}
+			tags.userDefinedText.push({
+				description: "SOURCE_URL",
+				value: track.url,
+			});
+		}
+
 		// Write tags
 		const success = NodeID3.write(tags, filePath);
 		if (!success) {
@@ -620,7 +647,7 @@ async function writeTrackMetadata(filePath, track, trackNumber) {
 				`    Warning: Could not write ID3 tags to ${path.basename(filePath)}`,
 			);
 		}
-	} catch (err) {
+	} catch (err: any) {
 		console.error(`    Warning: Error writing ID3 metadata: ${err.message}`);
 	}
 }
@@ -628,7 +655,7 @@ async function writeTrackMetadata(filePath, track, trackNumber) {
 /**
  * Create a local m3u playlist referencing downloaded files
  */
-async function createLocalPlaylist(_channelSlug, channelDir, tracks) {
+async function createLocalPlaylist(channelSlug: string, channelDir: string, tracks: Track[]): Promise<void> {
 	const files = await fs.readdir(channelDir);
 	const audioFiles = files.filter(
 		(f) =>
@@ -657,7 +684,7 @@ async function createLocalPlaylist(_channelSlug, channelDir, tracks) {
 /**
  * Set file timestamps to match track creation/update times from Radio4000
  */
-async function setFileTimestamps(filePath, track) {
+async function setFileTimestamps(filePath: string, track: Track): Promise<void> {
 	if (!filePath || !track) return;
 
 	try {
@@ -678,7 +705,7 @@ async function setFileTimestamps(filePath, track) {
 		// To sort tracks chronologically by when they were added to the channel,
 		// we set mtime (modification time) to the track's created_at time
 		await fs.utimes(filePath, updatedTime, createdTime);
-	} catch (err) {
+	} catch (err: any) {
 		if (err.code === "ENOENT") {
 			// File doesn't exist - this is the race condition we're trying to handle
 			console.log(
@@ -695,7 +722,7 @@ async function setFileTimestamps(filePath, track) {
 /**
  * Load status.json from channel directory (currently disabled to avoid creating status files)
  */
-async function loadStatus(channelDir) {
+async function loadStatus(channelDir: string): Promise<DownloadStatus> {
 	// Return default status to avoid creating status.json files
 	return {
 		downloaded: [],
@@ -710,7 +737,7 @@ async function loadStatus(channelDir) {
 /**
  * Save status.json to channel directory (currently disabled to avoid creating status files)
  */
-async function saveStatus(channelDir, status) {
+async function saveStatus(channelDir: string, status: DownloadStatus): Promise<void> {
 	// Do nothing to avoid creating status.json files
 	return;
 }
@@ -718,7 +745,7 @@ async function saveStatus(channelDir, status) {
 /**
  * Append a line to debug.txt (currently disabled to avoid creating debug files)
  */
-async function appendDebugLog(debugFile, message) {
+async function appendDebugLog(debugFileOrMessage: string, message?: string): Promise<void> {
 	// Do nothing to avoid creating debug.txt files
 	return;
 }
@@ -726,7 +753,7 @@ async function appendDebugLog(debugFile, message) {
 /**
  * Organize a single track by tags using symlinks
  */
-async function organizeTrackByTags(track, tracksDir, channelDir) {
+async function organizeTrackByTags(track: Track, tracksDir: string, channelDir: string): Promise<void> {
 	const sanitizedTitle = sanitizeFilename(track.title || "untitled");
 
 	// Find the actual downloaded file
@@ -764,14 +791,14 @@ async function organizeTrackByTags(track, tracksDir, channelDir) {
 			// Remove existing symlink if it exists
 			try {
 				await fs.unlink(linkPath);
-			} catch (err) {
+			} catch (err: any) {
 				if (err.code !== "ENOENT") throw err;
 			}
 
 			// Create relative symlink
 			const relativePath = path.relative(tagDir, sourcePath);
 			await fs.symlink(relativePath, linkPath);
-		} catch (err) {
+		} catch (err: any) {
 			console.error(
 				`    Warning: Could not create symlink for ${trackFile}: ${err.message}`,
 			);
@@ -786,7 +813,7 @@ async function organizeTrackByTags(track, tracksDir, channelDir) {
 /**
  * Organize all tracks by tags using symlinks (used for initial organization)
  */
-async function _organizeByTags(channelDir, tracksDir, tracks) {
+async function _organizeByTags(channelDir: string, tracksDir: string, tracks: Track[]): Promise<void> {
 	console.log("  📂 Organizing tracks by tags...");
 
 	// Create tags directory
@@ -808,7 +835,7 @@ async function _organizeByTags(channelDir, tracksDir, tracks) {
 /**
  * Sync channel directory using rsync
  */
-export async function syncChannel(channelSlug, destination) {
+export async function syncChannel(channelSlug: string, destination: string): Promise<void> {
 	const settings = await loadSettings();
 
 	if (!settings.features || !settings.features.rsyncEnabled) {
@@ -848,7 +875,7 @@ export async function syncChannel(channelSlug, destination) {
 			}
 		});
 
-		proc.on("error", (err) => {
+		proc.on("error", (err: any) => {
 			if (err.code === "ENOENT") {
 				reject(new Error("rsync not found. Please install rsync."));
 			} else {
@@ -861,7 +888,7 @@ export async function syncChannel(channelSlug, destination) {
 /**
  * Stop all downloads and cleanup
  */
-export async function stopDownloads() {
+export async function stopDownloads(): Promise<void> {
 	console.log("\n⏹  Stopping downloads...");
 
 	// Set shutdown flag to stop queue processing
@@ -882,6 +909,10 @@ export async function stopDownloads() {
 		try {
 			// Get the process ID before attempting to kill
 			const pid = currentDownloadProcess.pid;
+			if (!pid) {
+				console.log("  Process has no PID, cannot kill");
+				return;
+			}
 
 			console.log(`  Killing process tree for PID: ${pid}`);
 
@@ -891,12 +922,12 @@ export async function stopDownloads() {
 					// Kill the entire process group with SIGTERM first
 					process.kill(-pid, "SIGTERM");
 					console.log(`  Sent SIGTERM to process group: ${-pid}`);
-				} catch (groupKillErr) {
+				} catch (groupKillErr: any) {
 					// If process group kill fails, fall back to individual process kill
 					console.log(`  Process group kill failed: ${groupKillErr.message}`);
 					try {
 						currentDownloadProcess.kill("SIGTERM");
-					} catch (individualKillErr) {
+					} catch (individualKillErr: any) {
 						console.log(
 							`  Individual process kill also failed: ${individualKillErr.message}`,
 						);
@@ -911,19 +942,19 @@ export async function stopDownloads() {
 			await new Promise((resolve) => setTimeout(resolve, 500));
 
 			// If process still exists, send SIGKILL
-			if (currentDownloadProcess && !currentDownloadProcess.killed) {
+			if (currentDownloadProcess && !currentDownloadProcess.killed && pid) {
 				if (process.platform !== "win32") {
 					try {
 						// Kill the process group with SIGKILL
 						process.kill(-pid, "SIGKILL");
 						console.log(`  Sent SIGKILL to process group: ${-pid}`);
-					} catch (groupKillErr) {
+					} catch (groupKillErr: any) {
 						console.log(
 							`  Process group SIGKILL failed: ${groupKillErr.message}`,
 						);
 						try {
 							currentDownloadProcess.kill("SIGKILL");
-						} catch (individualKillErr) {
+						} catch (individualKillErr: any) {
 							console.log(
 								`  Individual process SIGKILL also failed: ${individualKillErr.message}`,
 							);
@@ -934,7 +965,7 @@ export async function stopDownloads() {
 					currentDownloadProcess.kill("SIGKILL");
 				}
 			}
-		} catch (err) {
+		} catch (err: any) {
 			console.log(`  Error stopping process: ${err.message}`);
 		}
 
@@ -953,7 +984,7 @@ export async function stopDownloads() {
 /**
  * Check if yt-dlp is installed
  */
-export async function checkYtdlp() {
+export async function checkYtdlp(): Promise<boolean> {
 	return new Promise((resolve) => {
 		const proc = spawn("yt-dlp", ["--version"]);
 		proc.on("close", (code) => resolve(code === 0));

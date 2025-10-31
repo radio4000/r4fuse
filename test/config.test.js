@@ -17,7 +17,7 @@ import {
   removeDownload,
   isFavorite,
   isDownload,
-} from '../src/config.js'
+} from '../dist/config.js'
 import {
   createTempDir,
   cleanupDir,

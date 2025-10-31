@@ -8,9 +8,13 @@
     "r4fuse": "./bin/r4fuse.js"
   },
   "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "type-check": "tsc --noEmit",
+    "prestart": "npm run build",
     "start": "node bin/r4fuse.js mount",
-    "dev": "node --watch bin/r4fuse.js mount",
-    "test": "node test/test.js"
+    "test": "node test/test.js",
+    "dev": "npm run build && node --watch bin/r4fuse.js mount"
   },
   "keywords": [
     "radio4000",
@@ -29,7 +33,10 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.2",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0"
   },
   "engines": {
     "node": ">=18"

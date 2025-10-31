@@ -2,10 +2,19 @@
  * Path parsing and utility functions
  */
 
+interface ParsedPath {
+  parts: string[];
+  root?: string;
+  channel?: string;
+  subdir?: string;
+  file?: string;
+  file2?: string; // For deeper nesting like /channels/slug/tags/tagname/file.txt
+}
+
 /**
  * Parse path into components
  */
-export function parsePath(path) {
+export function parsePath(path: string): ParsedPath {
 	const parts = path.split("/").filter(Boolean);
 	return {
 		parts,
@@ -20,7 +29,7 @@ export function parsePath(path) {
 /**
  * Sanitize filename
  */
-export function sanitizeFilename(str) {
+export function sanitizeFilename(str: string | undefined): string {
 	if (!str) return "untitled";
 
 	return (
